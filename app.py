@@ -1,23 +1,25 @@
 """
 Market Research Assistant
 =========================
-A Streamlit RAG application that generates industry reports from Wikipedia sources.
+A Streamlit RAG application that generates structured industry reports
+from Wikipedia sources in three stages:
 
-The pipeline runs in three stages:
     1. Validate the user's industry input via LLM
     2. Retrieve and filter Wikipedia pages via multi-query search
-    3. Generate a grounded, structured report under 500 words
+    3. Generate a grounded, cited report under 500 words
 
-Retrieval uses a broad-then-filter strategy: the LLM generates several
-Wikipedia-style search queries, the retriever casts a wide net, and a second
-LLM pass ranks and selects the five most relevant pages. This reduces the
-risk of missing important sub-topics that a single query would overlook.
+Retrieval uses a broad-then-filter approach: the LLM generates several
+Wikipedia-style queries covering different aspects of the industry, the
+retriever casts a wide net across all of them, and a second LLM pass
+reranks and selects the five most relevant pages. This reduces the risk
+of missing important sub-topics that a single query would overlook.
 
 Grounding is enforced through prompt constraints and low temperature (0.2),
 which pushes the model toward deterministic, source-faithful completions.
-Temperature does not eliminate hallucination — it only shifts the probability
-distribution toward more conservative outputs. A word-limit check runs after
-generation as a hard backstop, since LLMs are unreliable self-counters.
+Temperature alone does not eliminate hallucination — it only shifts the
+probability distribution toward more conservative outputs. A programmatic
+word-limit check runs after generation as a hard backstop, since LLMs are
+unreliable at self-counting tokens.
 """
 
 import io
@@ -47,20 +49,19 @@ LLM_DESCRIPTIONS = {
     "Gemini 2.5 Flash": "Fast & free — great for quick reports",
     "Gemini 2.5 Pro": "Most capable Gemini — best report quality",
 }
-
-# Pipeline tuning parameters — these balance retrieval breadth against API cost.
+# Pipeline tuning parameters — balance retrieval breadth against API cost.
 # Values were settled through repeated testing across a range of industry queries.
-DEFAULT_TEMPERATURE = 0.2          # Lower temperature = more deterministic outputs
+DEFAULT_TEMPERATURE = 0.2          # Lower = more deterministic, source-faithful outputs
 MAX_WIKI_RESULTS = 10              # Pages fetched per search query
 FINAL_SOURCE_COUNT = 5             # Sources used in the final report
-MAX_REPORT_WORDS = 480             # Soft target (leaves buffer below the 500-word limit)
+MAX_REPORT_WORDS = 480             # Soft target leaving buffer below the 500-word limit
 HARD_WORD_LIMIT = 500              # Enforced programmatically after generation
 WIKI_CONTENT_CHARS = 8000          # Characters extracted per Wikipedia page
 NUM_SEARCH_QUERIES = 5             # Number of search queries the LLM generates
 
 
 # ──────────────────────────────────────────────────────────────
-# HELPER FUNCTIONS — pipeline stages
+# HELPER FUNCTIONS — modular pipeline stages
 # ──────────────────────────────────────────────────────────────
 
 def handle_api_error(e: Exception, context: str = "Operation") -> None:
@@ -168,6 +169,7 @@ def validate_industry(llm, user_input: str) -> dict:
         elif lower.startswith("reason:"):
             result["reason"] = line.split(":", 1)[1].strip()
 
+    # Default to invalid if no VALID: line was found at all
     if not parsed_valid_line:
         result["is_valid"] = False
         result["reason"] = (
@@ -182,10 +184,10 @@ def generate_search_queries(llm, industry: str) -> list[str]:
     """Generate multiple Wikipedia search queries to broaden source coverage.
 
     A single query (e.g. 'renewable energy') tends to surface the same
-    high-level overview page repeatedly. By prompting the LLM to produce
+    high-level overview page repeatedly. Prompting the LLM to produce
     queries targeting distinct aspects — market size, regulation, key
-    companies, technology — we retrieve a more diverse candidate pool.
-    This is the same principle behind ensemble methods: combining varied
+    companies, technology — retrieves a more diverse candidate pool.
+    This mirrors the intuition behind ensemble methods: combining varied
     weak signals produces a stronger result than any single signal alone.
     """
     prompt = ChatPromptTemplate.from_messages([
@@ -224,10 +226,8 @@ def retrieve_wikipedia_pages(industry: str, queries: list[str]) -> list[dict]:
     Running the retriever independently for each query means the same page
     can appear in multiple result sets. Deduplication by title ensures each
     unique page is only passed forward once, keeping the candidate pool
-    clean before the LLM ranking step.
-
-    Failed queries are silently skipped so a single bad query string does
-    not abort the entire retrieval.
+    clean before the LLM ranking step. Failed queries are silently skipped
+    so a single bad query string does not abort the entire retrieval.
     """
     retriever = WikipediaRetriever(
         top_k_results=MAX_WIKI_RESULTS,
@@ -270,7 +270,7 @@ def select_top_pages(
 ) -> list[dict]:
     """Use the LLM to rank retrieved pages and select the five most relevant.
 
-    Without this filtering step, the broad retrieval often returns tangentially
+    Without this filtering step, broad retrieval often returns tangentially
     related pages — a founder biography, a geographic region article — that
     would dilute the report. The LLM sees each page's title and a short snippet,
     then returns the indices of the five pages most useful for a market research
@@ -280,6 +280,7 @@ def select_top_pages(
     if len(pages) <= FINAL_SOURCE_COUNT:
         return pages
 
+    # Build a numbered list of candidates — title + snippet — for the LLM to evaluate
     candidate_descriptions = ""
     for i, page in enumerate(pages):
         snippet = page["content"][:600]
@@ -329,7 +330,7 @@ def select_top_pages(
         if len(selected) == FINAL_SOURCE_COUNT:
             break
 
-    # If parsing fails, fall back to the first five pages
+    # If parsing fails entirely, fall back to the first five pages
     if len(selected) < FINAL_SOURCE_COUNT:
         for i, page in enumerate(pages):
             if i not in seen_indices:
@@ -345,25 +346,23 @@ def check_source_diversity(pages: list[dict]) -> dict:
     """Measure content overlap between retrieved pages using Jaccard similarity.
 
     Jaccard similarity between two sets A and B is |A ∩ B| / |A ∪ B|.
-    Applied here to word sets, it flags when pages share too much vocabulary
-    — a sign that multiple sources cover the same narrow sub-topic rather
-    than providing complementary perspectives. High source overlap tends to
-    produce shallow, repetitive reports.
-
-    Threshold 0.4: Wikipedia pages on the same industry typically share
-    15-25% vocabulary through common terminology. Above 40% suggests near-
-    duplicate coverage. Two or more high-overlap pairs triggers the warning
-    to avoid false positives from a single coincidental match.
+    Applied to word sets, it flags when pages share too much vocabulary —
+    a sign that multiple sources cover the same narrow sub-topic rather than
+    providing complementary perspectives. High overlap tends to produce
+    shallow, repetitive reports. The 0.4 threshold was chosen empirically:
+    Wikipedia pages on the same industry typically share 15-25% vocabulary
+    through common terminology; above 40% suggests near-duplicate coverage.
     """
     if len(pages) < 2:
         return {"is_diverse": True, "avg_overlap": 0.0, "warning": ""}
 
-    # Word sets built from the first 2000 characters for speed
+    # Word sets built from the first 2000 characters of each page for speed
     word_sets = []
     for page in pages:
         words = set(page["content"][:2000].lower().split())
         word_sets.append(words)
 
+    # Pairwise Jaccard similarity across all page combinations
     overlaps = []
     for i in range(len(word_sets)):
         for j in range(i + 1, len(word_sets)):
@@ -373,6 +372,8 @@ def check_source_diversity(pages: list[dict]) -> dict:
                 overlaps.append(len(intersection) / len(union))
 
     avg_overlap = sum(overlaps) / len(overlaps) if overlaps else 0.0
+    # Require two or more high-overlap pairs to trigger the warning —
+    # a single coincidental match should not penalise otherwise diverse sources
     high_overlap_count = sum(1 for o in overlaps if o > 0.4)
 
     if high_overlap_count >= 2:
@@ -395,7 +396,7 @@ def enforce_word_limit(text: str, limit: int = HARD_WORD_LIMIT) -> str:
     LLMs routinely overshoot stated word limits — the model predicts the next
     token without tracking an accurate running count. Truncating to the nearest
     full stop before the limit guarantees compliance without cutting mid-sentence.
-    The sentence-boundary check is only applied when that boundary falls past the
+    The sentence-boundary check only applies when that boundary falls past the
     halfway point, preventing excessive content loss from an early full stop.
     """
     words = text.split()
@@ -426,11 +427,11 @@ def count_words(text: str) -> int:
 def sanitise_for_streamlit(text: str) -> str:
     """Remove characters that Streamlit's markdown renderer interprets as LaTeX.
 
-    Streamlit passes markdown through a renderer that treats $...$ and $$...$$
-    as inline and block math delimiters. Wikipedia source content and LLM
-    outputs occasionally contain dollar signs and LaTeX-style backslash sequences
-    that trigger this, producing garbled mixed-font output. Stripping them here
-    keeps the rendered report clean without changing the meaning of the text.
+    Streamlit treats $...$ and $$...$$ as inline and block math delimiters.
+    Wikipedia content and LLM outputs occasionally contain dollar signs and
+    LaTeX-style backslash sequences that trigger this, producing garbled
+    mixed-font output. Stripping them keeps the rendered report clean without
+    changing the meaning of the text.
     """
     text = text.replace("$", "")
     text = text.replace("\\(", "(")
@@ -461,20 +462,20 @@ def split_report_into_sections(report: str) -> list[tuple[str, str]]:
     across different runs. Rather than relying on a specific format, this function
     searches for the known heading label strings and uses their positions in the
     text to extract body content. This makes the parser format-agnostic and
-    robust to prompt variation.
-
-    Returns a list of (heading_label, body_text) tuples in document order.
-    If no recognised headings are found, returns the full report as one section.
+    robust to prompt variation. If no recognised headings are found, the full
+    report is returned as a single section.
     """
+    # Matches any heading label regardless of ## markers, ** bold wrappers,
+    # or trailing colons — all of which LLMs produce inconsistently
     heading_positions = []
 
     for label in HEADING_LABELS:
         pattern = (
-            r"(?:\#{1,3}\s*)?"
-            r"(?:\*\*\s*)?"
-            + re.escape(label)
-            + r"(?:\s*\*\*)?"
-            r"\s*:?\s*"
+            r"(?:\#{1,3}\s*)?"        # Optional ## markers
+            r"(?:\*\*\s*)?"           # Optional opening **
+            + re.escape(label)        # The heading label itself
+            + r"(?:\s*\*\*)?"         # Optional closing **
+            r"\s*:?\s*"              # Optional colon and whitespace
         )
         match = re.search(pattern, report)
         if match:
@@ -503,24 +504,22 @@ def generate_report(
 ) -> str:
     """Generate a structured industry report grounded in retrieved Wikipedia sources.
 
-    The prompt is designed around two concerns that pull in opposite directions:
-    structure and grounding. Structure requires the model to follow a fixed
-    section order. Grounding requires it to use only source-provided facts.
-    Both are enforced via explicit instructions with good/bad examples — a
-    few-shot approach that shows the model what compliant output looks like
-    rather than just telling it.
+    The prompt balances two competing constraints: enforcing a fixed section
+    structure while keeping every claim grounded in the retrieved sources.
+    Good/bad examples in the prompt demonstrate what grounded output looks like
+    rather than just describing the rule — a few-shot approach that is more
+    reliable than instruction alone.
 
-    The word limit appears twice: once in the prompt as a soft instruction,
-    and once applied programmatically after generation. The programmatic
-    check is the reliable one — the prompt instruction alone is not sufficient.
-
-    Dollar signs are prohibited in the prompt because Streamlit renders $...$
-    as LaTeX math. This is caught at the prompt level and also stripped in
-    sanitise_for_streamlit() as a fallback.
+    The word limit appears twice: as a soft instruction in the prompt and as a
+    hard programmatic check after generation. The programmatic check is the
+    reliable one. Dollar signs are prohibited in the prompt because Streamlit
+    renders $...$ as LaTeX math — this is also caught by sanitise_for_streamlit()
+    as a fallback.
     """
     source_titles = [page["title"] for page in pages]
     titles_str = ", ".join(f'"{t}"' for t in source_titles)
 
+    # Combine all retrieved source text with clear attribution headers
     source_material = ""
     for i, page in enumerate(pages, 1):
         source_material += (
@@ -654,25 +653,24 @@ def generate_report(
     ]
     report = "\n".join(cleaned_lines).strip()
 
-    # Strip LaTeX-triggering characters before rendering
     report = sanitise_for_streamlit(report)
 
-    # Hard word limit enforced after generation — the prompt alone is insufficient
+    # Hard word limit enforced after generation — the prompt alone is not sufficient
     report = enforce_word_limit(report, HARD_WORD_LIMIT)
 
     return report
 
 
 # ──────────────────────────────────────────────────────────────
-# SESSION STATE — manages the multi-step pipeline flow
+# SESSION STATE — manages the multi-step flow
 # ──────────────────────────────────────────────────────────────
 
 def init_session_state():
     """Initialise session state variables on the first run.
 
     Streamlit reruns the entire script on every user interaction. Session
-    state persists values across these reruns so the pipeline remembers
-    where it is, what it has retrieved, and what report it has generated.
+    state persists values across reruns so the pipeline remembers which
+    step it is on, what it has retrieved, and what report it has generated.
     """
     defaults = {
         "current_step": 1,
@@ -692,8 +690,8 @@ def reset_pipeline():
     """Clear all pipeline state to start a fresh query.
 
     Called when the user submits a new industry name. Clearing stale
-    results ensures the UI never shows a mismatch between the input
-    and the displayed sources or report.
+    results ensures the UI never shows a mismatch between the current
+    input and previously displayed sources or report.
     """
     st.session_state.current_step = 1
     st.session_state.validated_industry = ""
@@ -709,10 +707,10 @@ def reset_pipeline():
 def inject_custom_css():
     """Inject custom CSS to style the report output professionally.
 
-    Streamlit's default styling works but is generic. Custom CSS creates
-    visual hierarchy that makes the report easier to scan — distinct
-    treatments for the executive summary, KPI cards, data table, and
-    conclusion help a reader quickly locate what matters.
+    Streamlit's default styling is functional but generic. Custom CSS creates
+    visual hierarchy that makes the report easier to scan — distinct treatments
+    for the executive summary, KPI cards, data table, and conclusion help a
+    reader quickly locate what matters.
     """
     st.markdown("""
     <style>
@@ -935,8 +933,8 @@ def render_sidebar() -> tuple[str, str]:
 
     The API key is collected via a password-type field (masked input) and
     held only in Streamlit's in-memory session state. It is never written
-    to disk or logged, and is only transmitted directly to the Google
-    Gemini API when making LLM calls.
+    to disk or logged, and is only transmitted to the Google Gemini API
+    when making LLM calls.
     """
     with st.sidebar:
         st.markdown("### Configuration")
@@ -990,13 +988,14 @@ def render_sidebar() -> tuple[str, str]:
 
 
 def render_step_1(llm):
-    """Step 1: Accept and validate the user's industry input."""
+    """Step 1: Industry input and validation."""
     st.header("Step 1: Enter an Industry")
     st.markdown(
         "Provide the name of an industry or economic sector to research. "
         "The assistant will validate your input before proceeding."
     )
 
+    # Text input
     industry = st.text_input(
         "Industry name",
         placeholder="e.g. Renewable Energy, Semiconductor Manufacturing, Fintech",
@@ -1038,7 +1037,7 @@ def render_step_1(llm):
 
 
 def render_step_2(llm):
-    """Step 2: Run the retrieval pipeline and display the five selected sources."""
+    """Step 2: Retrieve and display 5 most relevant Wikipedia sources."""
     industry = st.session_state.validated_industry
 
     st.header("Step 2: Relevant Wikipedia Sources")
@@ -1066,7 +1065,7 @@ def render_step_2(llm):
                         f"The report may be less comprehensive."
                     )
 
-                # LLM reranking step: filter the candidate pool to the best five
+                # LLM reranking: filter the candidate pool to the best five
                 top_pages = select_top_pages(llm, industry, raw_pages)
                 st.session_state.wiki_pages = top_pages
 
@@ -1120,11 +1119,9 @@ def fetch_industry_image(industry: str, page_titles: tuple | None = None) -> str
 
     Tries the industry name first, then falls back through the retrieved page
     titles until an image is found. SVG files are skipped as they are typically
-    logos or icons that render poorly as header images.
-
-    Cached with ttl=600 (10 minutes) to avoid repeated network calls on
-    Streamlit reruns. The page_titles parameter is a tuple rather than a list
-    because st.cache_data requires hashable arguments.
+    logos or icons that render poorly as header images. Cached for 10 minutes
+    to avoid repeated network calls on Streamlit reruns. page_titles is a tuple
+    rather than a list because st.cache_data requires hashable arguments.
     """
     import urllib.parse
     import requests
@@ -1147,7 +1144,7 @@ def fetch_industry_image(industry: str, page_titles: tuple | None = None) -> str
             for page in api_pages.values():
                 img = page.get("original", {}).get("source")
                 if img:
-                    if not img.lower().endswith(".svg"):
+                    if not img.lower().endswith(".svg"):  # SVGs render poorly as headers
                         return img
         except Exception:
             continue
@@ -1201,7 +1198,7 @@ def parse_markdown_table(text: str) -> list[list[str]] | None:
     rows = []
     for i, line in enumerate(table_lines):
         cells = [c.strip() for c in line.strip("|").split("|")]
-        if all(set(c.strip()) <= set("-: ") for c in cells):
+        if all(set(c.strip()) <= set("-: ") for c in cells):  # skip separator rows
             continue
         rows.append(cells)
 
@@ -1214,8 +1211,8 @@ def extract_table_from_body(body: str) -> tuple[str, list[list[str]] | None, str
     Returns (pre_table_text, table_rows_or_None, post_table_text).
     If no table is found, returns (body, None, "").
 
-    Scans line-by-line for pipe-delimited rows, handling both normal table
-    formatting and inline table fragments where pipes appear mid-paragraph.
+    Handles both normal pipe-row tables and inline table fragments where
+    pipes appear mid-paragraph rather than at line boundaries.
     """
     table_data = parse_markdown_table(body)
     if not table_data:
@@ -1325,7 +1322,7 @@ def render_report_section(heading: str, body: str):
     """Render a single report section with visual treatment matched to its role.
 
     Different sections carry different cognitive weight for the reader:
-    - Executive Summary: the first thing a reader scans — gets a highlighted callout
+    - Executive Summary: first thing a reader scans — gets a highlighted callout
     - Key Metrics: quantitative anchor points — gets large KPI number cards
     - Final Takeaway: the conclusion — gets a bold navy box for emphasis
     - Key Data: tabular data — rendered as styled HTML table
@@ -1393,32 +1390,32 @@ def sanitise_for_pdf(text: str) -> str:
     """Replace Unicode characters that fall outside the latin-1 character set.
 
     fpdf2's built-in Helvetica font only covers latin-1. Wikipedia content
-    frequently contains em-dashes, smart quotes, non-breaking spaces, and
-    other Unicode characters that trigger UnicodeEncodeError during PDF
-    rendering. Common offenders are mapped to safe equivalents; anything
-    remaining outside latin-1 is replaced with a fallback character.
+    frequently contains em-dashes, smart quotes, and non-breaking spaces that
+    trigger UnicodeEncodeError during PDF rendering. Common offenders are mapped
+    to safe equivalents; anything remaining outside latin-1 is replaced with a
+    fallback character.
     """
     replacements = {
-        "\u2013": "-",
-        "\u2014": " - ",
-        "\u2015": " - ",
-        "\u2018": "'",
-        "\u2019": "'",
-        "\u201c": '"',
-        "\u201d": '"',
-        "\u2026": "...",
-        "\u00a0": " ",
-        "\u2010": "-",
-        "\u2011": "-",
-        "\u2012": "-",
-        "\u00b7": " ",
-        "\u2022": "-",
-        "\u2023": "-",
-        "\u25cf": "-",
-        "\u00d7": "x",
-        "\u2264": "<=",
-        "\u2265": ">=",
-        "\u00b1": "+/-",
+        "\u2013": "-",    # en-dash
+        "\u2014": " - ",  # em-dash
+        "\u2015": " - ",  # horizontal bar
+        "\u2018": "'",    # left single quote
+        "\u2019": "'",    # right single quote (apostrophe)
+        "\u201c": '"',    # left double quote
+        "\u201d": '"',    # right double quote
+        "\u2026": "...",  # ellipsis
+        "\u00a0": " ",    # non-breaking space
+        "\u2010": "-",    # hyphen
+        "\u2011": "-",    # non-breaking hyphen
+        "\u2012": "-",    # figure dash
+        "\u00b7": " ",    # middle dot
+        "\u2022": "-",    # bullet
+        "\u2023": "-",    # triangular bullet
+        "\u25cf": "-",    # black circle
+        "\u00d7": "x",    # multiplication sign
+        "\u2264": "<=",   # less than or equal
+        "\u2265": ">=",   # greater than or equal
+        "\u00b1": "+/-",  # plus-minus sign
     }
     for char, replacement in replacements.items():
         text = text.replace(char, replacement)
@@ -1430,13 +1427,11 @@ def sanitise_for_pdf(text: str) -> str:
 def generate_pdf(industry: str, report: str, pages: list[dict]) -> bytes:
     """Generate a formatted PDF of the industry report for download.
 
-    Sections are parsed and rendered individually so headings get bold
-    navy styling and tables are drawn with borders. All text passes through
+    Sections are parsed and rendered individually so headings get bold navy
+    styling and tables are drawn with borders. All text passes through
     sanitise_for_pdf() before rendering to prevent encoding errors from
-    non-latin-1 characters in Wikipedia content.
-
-    fpdf2 was chosen over reportlab for its simpler API and smaller
-    dependency footprint.
+    non-latin-1 characters in Wikipedia content. fpdf2 was chosen over
+    reportlab for its simpler API and smaller dependency footprint.
     """
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=20)
@@ -1701,8 +1696,7 @@ def main():
 
     llm = initialise_llm(selected_model, api_key)
 
-    # Steps are rendered sequentially and remain visible once reached,
-    # so the user can review earlier stages without losing their place
+    # Steps remain visible once reached so the user can review earlier stages
     step = st.session_state.current_step
 
     render_step_1(llm)
