@@ -948,35 +948,40 @@ def inject_custom_css():
         margin: 0.5rem 0 0 0;
     }
 
-    /* -- KPI Metric Cards -- */
-    .kpi-row {
-        display: flex;
-        gap: 1rem;
-        margin: 1rem 0 1.5rem 0;
-    }
-    .kpi-card {
-        flex: 1;
-        background: #FFFFFF;
-        border: 1px solid #E0E4E8;
-        border-top: 4px solid #0085CA;
+    /* -- KPI Metrics Box -- */
+    .kpi-box {
+        background: #F0F6FC;
+        border: 1px solid #C8DDEF;
+        border-left: 5px solid #0085CA;
         border-radius: 8px;
-        padding: 1.2rem 1rem;
-        text-align: center;
-        box-shadow: 0 2px 6px rgba(0,0,0,0.06);
+        padding: 1.2rem 1.5rem;
+        margin: 0.8rem 0 1.2rem 0;
     }
-    .kpi-card .kpi-value {
-        font-size: 32px;
-        font-weight: 700;
+    .kpi-box .kpi-row {
+        display: flex;
+        flex-direction: column;
+        gap: 0.55rem;
+    }
+    .kpi-box .kpi-item {
+        display: flex;
+        align-items: baseline;
+        gap: 0.6rem;
+        font-size: 15px;
+        color: #1A1A2E;
+    }
+    .kpi-box .kpi-label {
+        font-weight: 600;
         color: #003A70;
-        line-height: 1.2;
-        margin-bottom: 6px;
+        min-width: 0;
+        white-space: nowrap;
     }
-    .kpi-card .kpi-label {
-        font-size: 12px;
+    .kpi-box .kpi-sep {
+        color: #888;
+        flex-shrink: 0;
+    }
+    .kpi-box .kpi-value {
         font-weight: 500;
-        color: #666666;
-        text-transform: uppercase;
-        letter-spacing: 0.5px;
+        color: #222;
     }
 
     /* -- Styled Data Table -- */
@@ -1496,117 +1501,70 @@ def extract_table_from_body(body: str) -> tuple[str, list[list[str]] | None, str
     )
 
 
-def _split_kpi_lines(body: str) -> list[str]:
-    """Split body text into candidate metric lines.
-
-    Handles three formats the LLM produces:
-    1. Normal: one metric per line  (most common)
-    2. Single-line run-on: all metrics jammed onto one line with no newlines
-       e.g. "Global Production: 4.4Bt Annual Growth: 3% Market Value: USD9B"
-       Detected when a line has 2+ colons and 10+ words -- split on the
-       boundary where a Title Case word follows a value token.
-    3. Numbered/bulleted: "1. Label: value" or "- Label: value"
-    """
-    raw_lines = body.strip().split("\n")
-    out = []
-    for line in raw_lines:
-        line = line.strip()
-        # Count colons: if there are multiple colons AND many words on one line,
-        # the LLM has put all metrics on a single line -- split it up.
-        colon_count = line.count(":")
-        word_count = len(line.split())
-        if colon_count >= 2 and word_count >= 8:
-            # Split on boundaries where a new Title-Case word follows a value.
-            # Pattern: split before a run of Title-Case words that precede a colon.
-            # e.g. "4.4Bt Annual Growth:" -> split before "Annual"
-            parts = re.split(r'(?<!\b[A-Z])(?=\b[A-Z][a-z][\w\s]{1,40}:)', line)
-            if len(parts) >= 2:
-                out.extend(parts)
-                continue
-        out.append(line)
-    return out
-
-
 def render_kpi_cards(body: str):
-    """Render Key Metrics section as large KPI cards in a horizontal row.
+    """Render Key Metrics section as a single styled box with labelled rows.
 
-    Parses 'LABEL: value' lines from the body. Handles bullet points,
-    bold markers, numbered prefixes, run-on single lines, and inline
-    source citations that LLMs occasionally add despite prompt instructions.
-    Always renders exactly 3 cards -- pads with 'N/A' if fewer than 3
-    metrics are found so the layout stays consistent.
-    Falls back to plain markdown only if no colon-separated lines exist at all.
+    Simpler and more robust than individual cards: all metrics go into one
+    box, so partial parses still render something useful. Handles any format
+    the LLM produces -- one metric per line, run-on single line, bulleted,
+    or numbered -- by normalising the body into candidate lines first.
     """
-    # Skip instruction-style lines the LLM sometimes echoes back
+    # Normalise body: if it looks like a run-on line (multiple colons, many words),
+    # split it at Title Case word boundaries so each metric becomes its own line.
+    normalised = body.strip()
+    if normalised.count(":") >= 2 and len(normalised.split("\n")) == 1:
+        # All on one line -- split before each Title-Case label
+        normalised = re.sub(
+            r'\s+(?=[A-Z][a-z][\w ]{1,40}:)',
+            "\n",
+            normalised,
+        )
+
     SKIP_PREFIXES = (
-        "extract", "strict format", "correct example", "wrong", "rules",
-        "note", "source", "http", "label:", "value:", "follow this",
+        "extract", "strict format", "correct", "wrong", "rules",
+        "note", "source", "http", "label", "value", "follow",
+        "output", "line format", "do not",
     )
 
     metrics = []
-    for line in _split_kpi_lines(body):
-        # Strip leading bullets, dashes, asterisks, and numbered prefixes
+    for line in normalised.split("\n"):
+        # Strip bullets, numbering, bold, hash markers
         line = re.sub(r"^\s*[-*\d]+[.)]*\s*", "", line)
-        # Strip bold markers, hash markers, and surrounding whitespace
         line = line.strip().strip("*").strip("#").strip()
         if not line or ":" not in line:
             continue
-        # Skip lines that look like prompt instructions echoed back
         if any(line.lower().startswith(p) for p in SKIP_PREFIXES):
             continue
         parts = line.split(":", 1)
         label = parts[0].strip().strip("*").strip()
         value = parts[1].strip().strip("*").strip()
-        # Strip trailing parenthetical source citations e.g. "(Semiconductor industry)"
+        # Strip trailing parenthetical citations e.g. "(Semiconductor industry)"
         value = re.sub(r"\s*\([^)]{0,80}\)\s*$", "", value).strip()
-        # Label should be short (a metric name, not a sentence or URL)
-        if (label
-                and value
-                and len(label) < 80
-                and len(label.split()) <= 8
-                and not label.lower().startswith("http")):
+        if label and value and len(label.split()) <= 8:
             metrics.append((label, value))
 
-    # Last-resort: if no metrics parsed but body has content with colons,
-    # try splitting on capital-letter word boundaries (handles run-on lines)
-    if not metrics and body.strip() and ":" in body:
-        run_on = re.sub(r"\s+", " ", body.replace("\n", " ")).strip()
-        # Split before sequences like "SomeLabel:" that follow a value
-        chunks = re.split(r'(?<=[a-z0-9%])\s+(?=[A-Z][a-zA-Z\s]{2,30}:)', run_on)
-        for chunk in chunks:
-            chunk = chunk.strip()
-            if ":" not in chunk:
-                continue
-            p = chunk.split(":", 1)
-            lbl = p[0].strip().strip("*")
-            val = p[1].strip().strip("*")
-            val = re.sub(r"\s*\([^)]{0,80}\)\s*$", "", val).strip()
-            if lbl and val and len(lbl.split()) <= 8:
-                metrics.append((lbl, val))
-            if len(metrics) == 3:
-                break
-
+    # If still empty, fall back to plain markdown
     if not metrics:
         st.markdown(sanitise_for_streamlit(body))
         return
 
-    # Always show exactly 3 cards -- pad if LLM returned fewer
-    metrics = metrics[:3]
-    while len(metrics) < 3:
-        metrics.append(("Data not available", "N/A"))
-
-    cards_html = '<div class="kpi-row">'
-    for label, value in metrics:
-        safe_value = sanitise_for_streamlit(value)
+    # Render as a single styled box -- one row per metric
+    rows_html = ""
+    for label, value in metrics[:5]:  # cap at 5 in case of over-parsing
         safe_label = sanitise_for_streamlit(label)
-        cards_html += (
-            f'<div class="kpi-card">'
-            f'<div class="kpi-value">{safe_value}</div>'
-            f'<div class="kpi-label">{safe_label}</div>'
+        safe_value = sanitise_for_streamlit(value)
+        rows_html += (
+            f'<div class="kpi-item">'
+            f'<span class="kpi-label">{safe_label}</span>'
+            f'<span class="kpi-sep">--</span>'
+            f'<span class="kpi-value">{safe_value}</span>'
             f'</div>'
         )
-    cards_html += '</div>'
-    st.markdown(cards_html, unsafe_allow_html=True)
+
+    st.markdown(
+        f'<div class="kpi-box"><div class="kpi-row">{rows_html}</div></div>',
+        unsafe_allow_html=True,
+    )
 
 
 def render_styled_table(table_data: list[list[str]]):
