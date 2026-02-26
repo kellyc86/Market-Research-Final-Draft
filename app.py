@@ -1199,28 +1199,42 @@ def render_step_1(llm, model_name: str = "", api_key: str = ""):
         "terms — for example, *'pharma'*, *'AI'*, or *'renewables'*."
     )
 
-    # If a suggestion chip or related industry button was clicked, the
-    # selected industry is stored in session state under "pending_industry".
-    # In that case we skip the text input entirely and show a confirmation
-    # UI instead — Streamlit does not allow updating a rendered text_input
-    # widget's value via session state once it is on screen.
-    pending = st.session_state.pop("pending_industry", None)
-    if pending:
+    # When a suggestion or related industry chip is clicked, the industry
+    # name is stored in "pending_industry" and a flag "pending_confirmed"
+    # starts as False. On the next rerun we show a confirmation screen.
+    # When the user clicks "Search", we set the flag to True and rerun,
+    # which triggers the actual pipeline. This two-step pattern avoids
+    # the Streamlit limitation where you cannot update a text_input value
+    # from session state after it has already been rendered.
+    pending = st.session_state.get("pending_industry", None)
+
+    if pending and not st.session_state.get("pending_confirmed", False):
+        # Show confirmation screen
         st.success(f"Selected: **{pending}**")
         col1, col2 = st.columns([1, 3])
         with col1:
             if st.button("Search this industry →", type="primary"):
-                reset_pipeline()
-                st.session_state.industry_input = pending
-                st.session_state.validated_industry = pending
-                st.session_state.current_step = 2
-                st.session_state.pop("related_industries", None)
-                st.session_state.pop("related_for", None)
+                st.session_state["pending_confirmed"] = True
                 st.rerun()
         with col2:
             if st.button("Choose a different industry"):
+                st.session_state.pop("pending_industry", None)
+                st.session_state.pop("pending_confirmed", None)
                 st.rerun()
         return
+
+    if pending and st.session_state.get("pending_confirmed", False):
+        # Confirmation clicked — run the pipeline for the pending industry
+        chosen = pending
+        st.session_state.pop("pending_industry", None)
+        st.session_state.pop("pending_confirmed", None)
+        reset_pipeline()
+        st.session_state.industry_input = chosen
+        st.session_state.validated_industry = chosen
+        st.session_state.current_step = 2
+        st.session_state.pop("related_industries", None)
+        st.session_state.pop("related_for", None)
+        st.rerun()
 
     industry = st.text_input(
         "Industry name",
