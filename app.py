@@ -1199,16 +1199,28 @@ def render_step_1(llm, model_name: str = "", api_key: str = ""):
         "terms — for example, *'pharma'*, *'AI'*, or *'renewables'*."
     )
 
-    # Streamlit's text_input ignores `value` after first render when a key
-    # is set — writing directly to session state before the widget renders
-    # is the correct way to programmatically update a keyed text input.
-    if "industry_text_input" not in st.session_state:
-        st.session_state["industry_text_input"] = ""
-    # Sync the widget value from industry_input whenever it changes
-    # (e.g. when a suggestion button or related industry chip is clicked)
-    if st.session_state.get("industry_input", "") != st.session_state.get("_last_synced_input", ""):
-        st.session_state["industry_text_input"] = st.session_state.get("industry_input", "")
-        st.session_state["_last_synced_input"] = st.session_state.get("industry_input", "")
+    # If a suggestion chip or related industry button was clicked, the
+    # selected industry is stored in session state under "pending_industry".
+    # In that case we skip the text input entirely and show a confirmation
+    # UI instead — Streamlit does not allow updating a rendered text_input
+    # widget's value via session state once it is on screen.
+    pending = st.session_state.pop("pending_industry", None)
+    if pending:
+        st.success(f"Selected: **{pending}**")
+        col1, col2 = st.columns([1, 3])
+        with col1:
+            if st.button("Search this industry →", type="primary"):
+                reset_pipeline()
+                st.session_state.industry_input = pending
+                st.session_state.validated_industry = pending
+                st.session_state.current_step = 2
+                st.session_state.pop("related_industries", None)
+                st.session_state.pop("related_for", None)
+                st.rerun()
+        with col2:
+            if st.button("Choose a different industry"):
+                st.rerun()
+        return
 
     industry = st.text_input(
         "Industry name",
@@ -1261,24 +1273,8 @@ def render_step_1(llm, model_name: str = "", api_key: str = ""):
             for i, suggestion in enumerate(INDUSTRY_SUGGESTIONS):
                 with cols[i % 3]:
                     if st.button(suggestion, key=f"suggest_{suggestion}", use_container_width=True):
-                        reset_pipeline()
-                        st.session_state.industry_input = suggestion
-                        st.session_state["industry_text_input"] = suggestion
-                        st.session_state["_last_synced_input"] = suggestion
-                        with st.spinner(f"Validating '{suggestion}'..."):
-                            try:
-                                if model_name and api_key:
-                                    res2 = _cached_validate_industry(model_name, api_key, suggestion)
-                                else:
-                                    res2 = validate_industry(llm, suggestion)
-                            except Exception as e:
-                                handle_api_error(e, "Validation")
-                                return
-                        if res2["is_valid"]:
-                            normalised2 = res2["normalised"] or suggestion
-                            st.session_state.validated_industry = normalised2
-                            st.session_state.current_step = 2
-                            st.rerun()
+                        st.session_state["pending_industry"] = suggestion
+                        st.rerun()
 
     elif not industry:
         st.info("Enter an industry name above to get started.")
@@ -1870,14 +1866,7 @@ def render_related_industries(llm, industry: str):
         for col, item in zip(cols, row_items):
             with col:
                 if st.button(f"→ {item}", key=f"related_{item}", use_container_width=True):
-                    reset_pipeline()
-                    st.session_state.industry_input = item
-                    st.session_state.validated_industry = item
-                    st.session_state["industry_text_input"] = item
-                    st.session_state["_last_synced_input"] = item
-                    st.session_state.current_step = 2
-                    st.session_state.pop("related_industries", None)
-                    st.session_state.pop("related_for", None)
+                    st.session_state["pending_industry"] = item
                     st.rerun()
 
 
