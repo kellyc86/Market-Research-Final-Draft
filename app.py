@@ -56,7 +56,8 @@ DEFAULT_TEMPERATURE = 0.2          # Lower = more deterministic, source-faithful
 MAX_WIKI_RESULTS = 10              # Pages fetched per search query
 FINAL_SOURCE_COUNT = 5             # Sources used in the final report
 MAX_REPORT_WORDS = 500             # Hard prose ceiling aligned with assignment requirement
-REPORT_WORD_TARGET = 420           # Soft prose target: leaves buffer below the hard limit
+REPORT_WORD_TARGET = 380           # Soft prose target: kept low so LLM lands ~400-430,
+                                   # well below the 500 ceiling before any trimming runs
 HARD_WORD_LIMIT = 500              # Enforced programmatically on prose only -- the Key Data
                                    # table is excluded from the count and never truncated
 WIKI_CONTENT_CHARS = 8000          # Characters extracted per Wikipedia page
@@ -594,6 +595,17 @@ def enforce_word_limit(text: str, limit: int = HARD_WORD_LIMIT) -> str:
             blocks[longest_idx][1] = " ".join(words[:-1])
 
     prose = "\n".join(h + b for h, b in blocks)
+
+    # Absolute final guarantee: if smart trimming still left us over (e.g.
+    # all remaining sections were protected), do a hard word-level cut on
+    # the prose only so count_words() can never return > limit.
+    if count_words(prose) > limit:
+        # Strip markdown symbols the same way count_words does, cut to limit,
+        # then return the cut prose (structure may be imperfect but word
+        # count is guaranteed -- this path should almost never be reached).
+        clean_words = re.sub(r"[#*|]", "", re.sub(r"-{3,}", "", prose)).split()
+        prose = " ".join(clean_words[:limit])
+
     return (prose.strip() + ("\n\n" + "\n".join(table_lines) if table_lines else "")).strip()
 
 
@@ -751,9 +763,11 @@ def generate_report(
          "inventing a number. It is far better to admit missing data "
          "than to fabricate a statistic.\n\n"
          "================================ WORD LIMIT\n"
-         "Maximum: {max_words} words for prose sections. Target: {max_words_target}-{max_words} words.\n"
-         "The Key Data table does NOT count toward the word limit -- include it in full.\n"
-         "If prose exceeds {max_words} words, rewrite more concisely.\n\n"
+         "STRICT MAXIMUM: {max_words} prose words. Target: {max_words_target} words.\n"
+         "Count every word in every prose section EXCEPT the Key Data table.\n"
+         "Write CONCISELY. Each section should be 2-4 sentences maximum.\n"
+         "Do NOT pad. Do NOT repeat points made in earlier sections.\n"
+         "The Key Data table does NOT count -- include it in full.\n\n"
          "================================ MANDATORY STRUCTURE\n"
          "Use markdown headings (##) followed by a NEWLINE, then the "
          "section body on the NEXT line. Never put heading and body "
@@ -862,32 +876,9 @@ def generate_report(
 
     report = sanitise_for_streamlit(report)
 
-    # If the report is over the prose word limit, ask the LLM to condense it.
-    # This preserves all sections and good content -- it trims fluff and
-    # redundancy rather than blindly dropping lines from the bottom.
-    # enforce_word_limit() runs afterwards as a hard safety net in case the
-    # rewrite itself overshoots (LLMs are unreliable at self-counting).
-    if count_words(report) > HARD_WORD_LIMIT:
-        condense_prompt = ChatPromptTemplate.from_messages([
-            ("system",
-             "You are an expert editor. The report below exceeds the "
-             f"{HARD_WORD_LIMIT}-word prose limit. Rewrite it so the prose "
-             f"is under {HARD_WORD_LIMIT} words by:\n"
-             "- Cutting redundant or repetitive sentences\n"
-             "- Removing filler phrases ('it is important to note that', etc.)\n"
-             "- Tightening wordy constructions\n"
-             "- Keeping ALL section headings exactly as they are\n"
-             "- Keeping ALL source citations in parentheses\n"
-             "- Keeping the Key Data markdown table completely unchanged\n"
-             "- Keeping every section -- do NOT delete any section\n\n"
-             "Return ONLY the revised report, no commentary."),
-            ("human", "{report}"),
-        ])
-        condense_chain = condense_prompt | llm | StrOutputParser()
-        report = condense_chain.invoke({"report": report})
-        report = sanitise_for_streamlit(report)
-
-    # Hard safety net -- if LLM rewrite still overshoots, drop lines from end
+    # Programmatic safety net -- runs every time regardless of word count.
+    # The prompt targets 380 words so the LLM should land well under 500;
+    # enforce_word_limit handles the rare cases where it overshoots.
     report = enforce_word_limit(report, HARD_WORD_LIMIT)
 
     return report
