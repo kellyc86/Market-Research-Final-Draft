@@ -8,18 +8,19 @@ from Wikipedia sources in three stages:
     2. Retrieve and filter Wikipedia pages via multi-query search
     3. Generate a grounded, cited report under 500 words
 
-Retrieval uses a broad-then-filter approach: the LLM generates several
-Wikipedia-style queries covering different aspects of the industry, the
-retriever casts a wide net across all of them, and a second LLM pass
-reranks and selects the five most relevant pages. This reduces the risk
-of missing important sub-topics that a single query would overlook.
+Retrieval follows a broad-then-filter design: the LLM generates five
+Wikipedia-style queries covering distinct aspects of the industry, the
+retriever casts a wide net across all of them in parallel, and a second
+LLM pass reranks and selects the five most relevant pages. This reduces
+the risk of missing important sub-topics that a single query would overlook
+and mirrors ensemble reasoning -- diverse weak signals outperform one strong one.
 
-Grounding is enforced through prompt constraints and low temperature (0.2),
-which pushes the model toward deterministic, source-faithful completions.
-Temperature alone does not eliminate hallucination -- it only shifts the
-probability distribution toward more conservative outputs. A programmatic
-word-limit check runs after generation as a hard backstop, since LLMs are
-unreliable at self-counting tokens.
+Grounding is enforced through explicit prompt constraints and low temperature
+(0.2), which reduces stochastic variation and keeps outputs closer to the
+retrieved source material. Temperature alone does not eliminate hallucination;
+it only shifts the probability distribution toward more conservative completions.
+A programmatic word-limit check runs after generation as a hard backstop,
+since LLMs cannot reliably track their own output length.
 """
 
 import io
@@ -96,12 +97,12 @@ def handle_api_error(e: Exception, context: str = "Operation") -> None:
 
 
 def initialise_llm(model_name: str, api_key: str) -> ChatGoogleGenerativeAI:
-    """Instantiate the LangChain Gemini model for a given selection and key.
+    """Instantiate the Gemini model with a fixed low temperature.
 
-    Temperature 0.2 was chosen deliberately: lower values produce more
-    consistent, factual completions, which matters here because the report
-    must stay grounded in retrieved sources. A higher temperature risks
-    the model generating plausible-sounding but unsupported statistics.
+    Temperature 0.2 keeps outputs closer to the training distribution's
+    high-probability completions, which tend to be more factually conservative.
+    The tradeoff is reduced creativity, which is acceptable here -- we want
+    the model to report what the sources say, not speculate beyond them.
     """
     model_id = LLM_MODEL_MAP[model_name]
     return ChatGoogleGenerativeAI(
@@ -113,14 +114,12 @@ def initialise_llm(model_name: str, api_key: str) -> ChatGoogleGenerativeAI:
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def _cached_validate_industry(model_name: str, api_key: str, user_input: str) -> dict:
-    """Cached wrapper around industry validation.
+    """Cached wrapper so repeated validation calls don't burn API quota.
 
-    Validation makes an LLM call for every submission, even if the user
-    types the same industry twice in a session. Caching by (model, key, input)
-    means repeat submissions -- common when users tweak capitalisation or
-    re-run -- hit the cache instantly instead of spending 1-2 seconds on
-    an API round-trip. TTL of one hour prevents stale results across
-    very long sessions.
+    Streamlit reruns the whole script on every interaction, so without caching
+    the validation LLM call would fire again on unrelated UI events. Keying the
+    cache on (model, api_key, input) means genuinely different queries always
+    run fresh while re-submissions hit the cache in under a millisecond.
     """
     llm = ChatGoogleGenerativeAI(
         model=LLM_MODEL_MAP[model_name],
@@ -132,12 +131,11 @@ def _cached_validate_industry(model_name: str, api_key: str, user_input: str) ->
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def _cached_generate_search_queries(model_name: str, api_key: str, industry: str) -> list[str]:
-    """Cached wrapper around query generation.
+    """Cached wrapper for search query generation.
 
-    The same industry name always produces the same set of five queries --
-    the output is deterministic at temperature 0.2. Caching this call
-    saves another 1-2 seconds on re-runs and on the common case where
-    the user goes back and re-generates after reading the sources.
+    Query generation is cheap but adds ~1 second of latency. Since the same
+    industry name produces consistent queries at low temperature, caching avoids
+    redundant calls when the user re-runs or navigates back through the pipeline.
     """
     llm = ChatGoogleGenerativeAI(
         model=LLM_MODEL_MAP[model_name],
@@ -148,15 +146,15 @@ def _cached_generate_search_queries(model_name: str, api_key: str, industry: str
 
 
 def validate_industry(llm, user_input: str) -> dict:
-    """Use the LLM to determine whether the user's input names a real industry.
+    """LLM-based industry validation with normalisation.
 
-    Simple string matching would miss abbreviations, informal names, and
-    misspellings. LLM-based validation handles these naturally -- 'pharma'
-    normalises to 'Pharmaceutical Industry', 'AI' to 'Artificial Intelligence
-    Industry' -- while still rejecting company names, person names, and
-    freeform text.
+    Rule-based matching (regex, word lists) can't handle the range of informal
+    inputs users actually type -- 'pharma', 'EVs', 'oil'. An LLM handles
+    synonyms and abbreviations naturally while still rejecting company names
+    and nonsense. The structured three-line output format makes parsing
+    deterministic and avoids having to interpret free-form prose responses.
 
-    Returns a dict: is_valid (bool), normalised name (str), reason (str).
+    Returns a dict with keys: is_valid (bool), normalised (str), reason (str).
     """
     prompt = ChatPromptTemplate.from_messages([
         ("system",
@@ -236,14 +234,15 @@ def validate_industry(llm, user_input: str) -> dict:
 
 
 def generate_search_queries(llm, industry: str) -> list[str]:
-    """Generate multiple Wikipedia search queries to broaden source coverage.
+    """Generate five aspect-targeted Wikipedia queries for broader source coverage.
 
-    A single query (e.g. 'renewable energy') tends to surface the same
-    high-level overview page repeatedly. Prompting the LLM to produce
-    queries targeting distinct aspects -- market size, regulation, key
-    companies, technology -- retrieves a more diverse candidate pool.
-    This mirrors the intuition behind ensemble methods: combining varied
-    weak signals produces a stronger result than any single signal alone.
+    A single query reliably surfaces the main overview article but misses
+    adjacent pages on regulation, key firms, and technology -- all of which
+    matter for a useful market report. Splitting retrieval across five targeted
+    queries gets a more representative candidate pool before the reranking step
+    selects the best five. The Wikipedia article-title format is important:
+    conversational queries ('what is the semiconductor market size?') return
+    poor results from the Wikipedia API compared to encyclopaedic titles.
     """
     prompt = ChatPromptTemplate.from_messages([
         ("system",
@@ -276,11 +275,12 @@ def generate_search_queries(llm, industry: str) -> list[str]:
 
 
 def _fetch_single_query(query: str) -> list[dict]:
-    """Fetch Wikipedia pages for a single query. Runs inside a thread.
+    """Fetch Wikipedia pages for one query -- designed to run inside a thread.
 
-    Isolated into its own function so ThreadPoolExecutor can call it
-    independently per query. Returns an empty list on any failure so
-    a single bad query does not interrupt the other concurrent fetches.
+    Returning an empty list on failure rather than raising means one bad query
+    (e.g. a term with no Wikipedia article) doesn't abort the whole retrieval
+    batch. The caller aggregates results across threads so partial failures
+    degrade gracefully rather than crashing the pipeline.
     """
     retriever = WikipediaRetriever(
         top_k_results=MAX_WIKI_RESULTS,
@@ -306,16 +306,15 @@ def _fetch_single_query(query: str) -> list[dict]:
 
 
 def retrieve_wikipedia_pages(industry: str, queries: list[str]) -> list[dict]:
-    """Retrieve Wikipedia pages for all queries in parallel, deduplicated by title.
+    """Run all Wikipedia queries concurrently and return deduplicated results.
 
-    Sequential retrieval (one query at a time) is the main bottleneck in the
-    pipeline -- each Wikipedia API call takes 1-3 seconds and they have no
-    dependency on each other. Running them concurrently with a thread pool
-    cuts retrieval time by roughly 4-5x for five queries, since the wall-clock
-    time is determined by the slowest single request rather than the sum of all.
-
-    Threads are used rather than async because WikipediaRetriever is a
-    synchronous blocking call and does not expose an async interface.
+    Sequential retrieval was the biggest bottleneck in early versions -- five
+    queries at ~2 seconds each meant 10 seconds of waiting before any ranking
+    could begin. Parallelising with ThreadPoolExecutor brings this closer to
+    the slowest single request (~2-3s total). Threads rather than asyncio
+    because WikipediaRetriever is synchronous and has no async interface.
+    Deduplication by title prevents the same article appearing multiple times
+    when different queries happen to surface it.
     """
     pages = []
     seen_titles = set()
@@ -336,14 +335,15 @@ def select_top_pages(
     industry: str,
     pages: list[dict],
 ) -> list[dict]:
-    """Use the LLM to rank retrieved pages and select the five most relevant.
+    """LLM-as-reranker: select the five most relevant pages from the candidate pool.
 
-    Without this filtering step, broad retrieval often returns tangentially
-    related pages -- a founder biography, a geographic region article -- that
-    would dilute the report. The LLM sees each page's title and a short snippet,
-    then returns the indices of the five pages most useful for a market research
-    report. This is an LLM-as-reranker pattern: cheap to run, but meaningfully
-    improves the signal-to-noise ratio of what reaches the generation step.
+    Broad retrieval reliably brings back tangential pages -- founder biographies,
+    geographic overviews, narrowly scoped sub-articles -- that would dilute the
+    final report. Having the LLM evaluate title and opening snippet for relevance
+    to a market research brief filters these out cheaply. The snippet-only input
+    keeps token cost low while giving enough signal for relevance judgement.
+    Fallback to the first five pages if the LLM response is unparseable ensures
+    the pipeline never stalls on a malformed reranker output.
     """
     if len(pages) <= FINAL_SOURCE_COUNT:
         return pages
@@ -411,21 +411,14 @@ def select_top_pages(
 
 
 def filter_low_quality_pages(pages: list[dict]) -> list[dict]:
-    """Remove Wikipedia stub pages and disambiguation pages before LLM ranking.
+    """Remove stubs and disambiguation pages before passing candidates to the reranker.
 
-    Two failure modes degrade report quality without this filter:
-    1. Stub pages -- Wikipedia articles under ~300 words that contain
-       almost no substantive content. Passing these to the LLM ranker
-       wastes ranking capacity on pages that would be useless as sources.
-    2. Disambiguation pages -- pages that only list alternative meanings
-       of a term. These contain no industry content at all and are
-       identifiable by the presence of 'may refer to' in the opening text.
-
-    The minimum length threshold (1500 characters) is deliberately
-    conservative. A page this short is almost certainly a stub or a
-    very narrow sub-article that adds little to a broad industry report.
-    Raising the threshold would risk discarding legitimately concise but
-    useful overview articles.
+    Without this step, the LLM reranker wastes ranking capacity on near-empty
+    articles. Two patterns reliably identify low-value pages: disambiguation pages
+    open with 'may refer to', and stub articles are identifiable by length alone.
+    The 1,500-character threshold is intentionally conservative -- a genuine
+    industry overview article is almost always longer than this. Setting it higher
+    risked discarding useful but concise pages on niche sub-sectors.
     """
     MIN_CONTENT_LENGTH = 1500
     filtered = []
@@ -445,15 +438,16 @@ def filter_low_quality_pages(pages: list[dict]) -> list[dict]:
 
 
 def check_source_diversity(pages: list[dict]) -> dict:
-    """Measure content overlap between retrieved pages using Jaccard similarity.
+    """Flag low source diversity using pairwise Jaccard similarity.
 
-    Jaccard similarity between two sets A and B is |A intersection B| / |A union B|.
-    Applied to word sets, it flags when pages share too much vocabulary --
-    a sign that multiple sources cover the same narrow sub-topic rather than
-    providing complementary perspectives. High overlap tends to produce
-    shallow, repetitive reports. The 0.4 threshold was chosen empirically:
-    Wikipedia pages on the same industry typically share 15-25% vocabulary
-    through common terminology; above 40% suggests near-duplicate coverage.
+    Jaccard similarity (|intersection| / |union| on word sets) measures how much
+    vocabulary two pages share. High overlap between multiple sources suggests
+    they cover the same narrow sub-topic rather than complementary angles, which
+    tends to produce shallow, repetitive reports. The 0.4 threshold came from
+    manually checking outputs: same-industry Wikipedia pages typically share
+    15-25% vocabulary through shared terminology; above 40% usually means
+    near-duplicate coverage. Requiring two or more high-overlap pairs to trigger
+    the warning avoids false positives from one coincidentally similar pair.
     """
     if len(pages) < 2:
         return {"is_diverse": True, "avg_overlap": 0.0, "warning": ""}
@@ -493,14 +487,13 @@ def check_source_diversity(pages: list[dict]) -> dict:
 
 
 def generate_related_industries(llm, industry: str) -> list[str]:
-    """Generate a list of related industries for deeper research suggestions.
+    """Suggest adjacent industries to encourage broader contextual research.
 
-    A good analyst does not stop at a single industry in isolation -- adjacent
-    sectors often explain demand dynamics, supply chain dependencies, or
-    competitive threats that shape the focal industry. For example, researching
-    Electric Vehicles naturally connects to Battery Manufacturing, Semiconductor
-    Industry, and Renewable Energy. Surfacing these connections helps the user
-    build a more complete picture with follow-on searches.
+    Analysing an industry in isolation misses upstream suppliers, downstream
+    customers, and substitutes that often explain the most important market
+    dynamics. Surfacing these connections at the end of the report prompts
+    follow-on searches and makes the tool more useful for iterative research
+    rather than one-off lookups.
     """
     prompt = ChatPromptTemplate.from_messages([
         ("system",
@@ -522,12 +515,15 @@ def generate_related_industries(llm, industry: str) -> list[str]:
 
 
 def enforce_word_limit(text: str, limit: int = HARD_WORD_LIMIT) -> str:
-    """Hard safety net: trim prose to limit while preserving all section structure.
+    """Programmatic backstop ensuring prose never exceeds the 500-word limit.
 
-    Extracts the Key Data table first (pipe rows), then trims individual
-    sentences from section bodies -- shortest sections last, longest first --
-    until count_words() reports <= limit. Table is always reattached in full.
-    This is only reached if the LLM condensing pass still overshoots.
+    The prompt targets 380 words, so this function is rarely needed -- but
+    LLMs cannot reliably self-count, so relying on the prompt alone is not
+    sufficient. The algorithm separates table pipe rows first (they are
+    excluded from the count and always reattached in full), then trims
+    sentences from the longest prose sections iteratively until count_words()
+    confirms compliance. Protected sections (Key Metrics, Key Data, Final
+    Takeaway) are never trimmed to preserve report integrity.
     """
     # Step 1: pull out ALL table rows so they are never touched
     prose_lines = []
@@ -610,12 +606,15 @@ def enforce_word_limit(text: str, limit: int = HARD_WORD_LIMIT) -> str:
 
 
 def count_words(text: str) -> int:
-    """Count substantive prose words, excluding table rows and markdown symbols.
+    """Count prose words only, excluding table rows and markdown formatting.
 
-    Table pipe rows (| col | col |) are excluded entirely because they are
-    structured data appended outside the prose word limit. Heading markers,
-    bold/italic markers, and separator rows are also stripped so the count
-    reflects only readable prose words.
+    Table pipe rows are structured data sitting outside the prose limit, so
+    they are stripped before counting. Heading markers, bold/italic asterisks,
+    and separator rows are also removed so the count reflects readable words
+    rather than formatting artefacts. This function is used both to display
+    the word count and inside enforce_word_limit -- using the same logic in
+    both places guarantees the displayed figure and the truncation threshold
+    can never disagree.
     """
     # Remove table rows before counting
     lines = [
@@ -630,13 +629,13 @@ def count_words(text: str) -> int:
 
 
 def sanitise_for_streamlit(text: str) -> str:
-    """Remove characters that Streamlit's markdown renderer interprets as LaTeX.
+    """Strip characters that Streamlit's markdown renderer misinterprets as LaTeX.
 
-    Streamlit treats $...$ and $$...$$ as inline and block math delimiters.
-    Wikipedia content and LLM outputs occasionally contain dollar signs and
-    LaTeX-style backslash sequences that trigger this, producing garbled
-    mixed-font output. Stripping them keeps the rendered report clean without
-    changing the meaning of the text.
+    Streamlit renders $...$ and $$...$$ as math, which breaks whenever Wikipedia
+    content or LLM output contains currency values or LaTeX-style sequences.
+    Rather than escaping them (which adds backslashes visible to users), the
+    simpler fix is to remove dollar signs entirely -- currency is written as
+    'USD X billion' throughout the prompt, so nothing meaningful is lost.
     """
     text = text.replace("$", "")
     text = text.replace("\\(", "(")
@@ -660,15 +659,14 @@ HEADING_LABELS = [
 
 
 def split_report_into_sections(report: str) -> list[tuple[str, str]]:
-    """Split a report string into (heading, body) tuples.
+    """Parse the report into (heading, body) pairs, format-agnostically.
 
-    LLMs are inconsistent with heading formatting -- the same model may output
-    '## Executive Summary', '**Executive Summary**', or plain 'Executive Summary'
-    across different runs. Rather than relying on a specific format, this function
-    searches for the known heading label strings and uses their positions in the
-    text to extract body content. This makes the parser format-agnostic and
-    robust to prompt variation. If no recognised headings are found, the full
-    report is returned as a single section.
+    The same model can output '## Executive Summary', '**Executive Summary**',
+    or plain 'Executive Summary' across different runs even with identical prompts.
+    Searching for the known heading label strings by position rather than by
+    markdown format makes the parser resilient to this variation. Body content
+    is then the text between consecutive heading positions, so partial or
+    reordered outputs still parse correctly.
     """
     # Matches any heading label regardless of ## markers, ** bold wrappers,
     # or trailing colons -- all of which LLMs produce inconsistently
@@ -707,19 +705,15 @@ def generate_report(
     industry: str,
     pages: list[dict],
 ) -> str:
-    """Generate a structured industry report grounded in retrieved Wikipedia sources.
+    """Generate a structured, source-grounded industry report via the LLM.
 
-    The prompt balances two competing constraints: enforcing a fixed section
-    structure while keeping every claim grounded in the retrieved sources.
-    Good/bad examples in the prompt demonstrate what grounded output looks like
-    rather than just describing the rule -- a few-shot approach that is more
-    reliable than instruction alone.
-
-    The word limit appears twice: as a soft instruction in the prompt and as a
-    hard programmatic check after generation. The programmatic check is the
-    reliable one. Dollar signs are prohibited in the prompt because Streamlit
-    renders $...$ as LaTeX math -- this is also caught by sanitise_for_streamlit()
-    as a fallback.
+    The prompt uses few-shot examples to demonstrate grounded vs hallucinated
+    output -- instruction alone proved insufficient during testing. Dollar signs
+    are explicitly banned in the prompt because Streamlit renders $...$ as LaTeX;
+    sanitise_for_streamlit() catches any that slip through as a second defence.
+    The word limit appears in the prompt as a soft target (380 words) and is
+    enforced programmatically afterwards as a hard guarantee, since LLMs
+    consistently overshoot word counts regardless of how the instruction is phrased.
     """
     source_titles = [page["title"] for page in pages]
     titles_str = ", ".join(f'"{t}"' for t in source_titles)
@@ -928,12 +922,13 @@ def reset_pipeline():
 # --------------------------------------------------------------
 
 def inject_custom_css():
-    """Inject custom CSS to style the report output professionally.
+    """Apply custom CSS to create a professional, scannable report layout.
 
-    Streamlit's default styling is functional but generic. Custom CSS creates
-    visual hierarchy that makes the report easier to scan -- distinct treatments
-    for the executive summary, KPI cards, data table, and conclusion help a
-    reader quickly locate what matters.
+    Streamlit's default styling gives no visual hierarchy between sections.
+    Distinct treatments for the executive summary (callout box), key metrics
+    (highlighted data box), data table (navy header), and conclusion (dark
+    banner) let a reader scan and extract the most important points quickly --
+    which matters when the target audience is time-pressured decision-makers.
     """
     st.markdown("""
     <style>
@@ -1212,12 +1207,12 @@ def inject_custom_css():
 
 
 def render_sidebar() -> tuple[str, str]:
-    """Render the sidebar with model selection and API key entry.
+    """Render sidebar controls and return the selected model name and API key.
 
-    The API key is collected via a password-type field (masked input) and
-    held only in Streamlit's in-memory session state. It is never written
-    to disk or logged, and is only transmitted to the Google Gemini API
-    when making LLM calls.
+    The API key uses Streamlit's password input type so it is masked on screen
+    and held only in session memory -- it is never written to disk or included
+    in any log. It is passed directly to the Gemini API on each call and goes
+    no further.
     """
     with st.sidebar:
         st.markdown("### Configuration")
