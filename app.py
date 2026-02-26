@@ -703,17 +703,19 @@ def generate_report(
          "Key insight, strategic implication, and recommendation in "
          "2-3 sentences.\n\n"
          "## Key Metrics\n"
-         "Extract exactly 3 key quantitative metrics from the sources.\n"
-         "STRICT FORMAT -- each metric on its own line, nothing else on that line:\n"
-         "LABEL: value\n\n"
-         "CORRECT example (follow this exactly):\n"
+         "Output EXACTLY 3 lines. Each line is ONE metric. "
+         "Each line MUST end with a newline character before the next metric starts. "
+         "Do NOT put multiple metrics on the same line.\n\n"
+         "Line format: Label: Value\n\n"
+         "CORRECT (3 separate lines, each on its own line):\n"
          "Global Market Size: USD 1.5 trillion\n"
          "Annual Growth Rate: 8.2% CAGR\n"
          "Market Concentration: Top 5 firms hold 45% share\n\n"
-         "WRONG (do NOT add source citations or extra text on these lines):\n"
+         "WRONG (all on one line -- do NOT do this):\n"
+         "Global Market Size: USD 1.5 trillion Annual Growth Rate: 8.2% CAGR\n\n"
+         "WRONG (with citations -- do NOT do this):\n"
          "Global Market Size: USD 1.5 trillion (Semiconductor industry)\n\n"
-         "Rules: exactly 3 lines, each line is ONLY 'Label: Value', "
-         "no bullets, no numbering, no parentheses, no extra words.\n\n"
+         "Rules: exactly 3 lines, no bullets, no numbering, no parentheses.\n\n"
          "## Industry Overview\n"
          "Definition, scope, and scale indicators.\n\n"
          "## Market Structure & Competitive Dynamics\n"
@@ -1494,12 +1496,43 @@ def extract_table_from_body(body: str) -> tuple[str, list[list[str]] | None, str
     )
 
 
+def _split_kpi_lines(body: str) -> list[str]:
+    """Split body text into candidate metric lines.
+
+    Handles three formats the LLM produces:
+    1. Normal: one metric per line  (most common)
+    2. Single-line run-on: all metrics jammed onto one line with no newlines
+       e.g. "Global Production: 4.4Bt Annual Growth: 3% Market Value: USD9B"
+       Detected when a line has 2+ colons and 10+ words -- split on the
+       boundary where a Title Case word follows a value token.
+    3. Numbered/bulleted: "1. Label: value" or "- Label: value"
+    """
+    raw_lines = body.strip().split("\n")
+    out = []
+    for line in raw_lines:
+        line = line.strip()
+        # Count colons: if there are multiple colons AND many words on one line,
+        # the LLM has put all metrics on a single line -- split it up.
+        colon_count = line.count(":")
+        word_count = len(line.split())
+        if colon_count >= 2 and word_count >= 8:
+            # Split on boundaries where a new Title-Case word follows a value.
+            # Pattern: split before a run of Title-Case words that precede a colon.
+            # e.g. "4.4Bt Annual Growth:" -> split before "Annual"
+            parts = re.split(r'(?<!\b[A-Z])(?=\b[A-Z][a-z][\w\s]{1,40}:)', line)
+            if len(parts) >= 2:
+                out.extend(parts)
+                continue
+        out.append(line)
+    return out
+
+
 def render_kpi_cards(body: str):
     """Render Key Metrics section as large KPI cards in a horizontal row.
 
     Parses 'LABEL: value' lines from the body. Handles bullet points,
-    bold markers, numbered prefixes, and inline source citations that
-    LLMs occasionally add despite prompt instructions.
+    bold markers, numbered prefixes, run-on single lines, and inline
+    source citations that LLMs occasionally add despite prompt instructions.
     Always renders exactly 3 cards -- pads with 'N/A' if fewer than 3
     metrics are found so the layout stays consistent.
     Falls back to plain markdown only if no colon-separated lines exist at all.
@@ -1511,7 +1544,7 @@ def render_kpi_cards(body: str):
     )
 
     metrics = []
-    for line in body.strip().split("\n"):
+    for line in _split_kpi_lines(body):
         # Strip leading bullets, dashes, asterisks, and numbered prefixes
         line = re.sub(r"^\s*[-*\d]+[.)]*\s*", "", line)
         # Strip bold markers, hash markers, and surrounding whitespace
@@ -1533,6 +1566,25 @@ def render_kpi_cards(body: str):
                 and len(label.split()) <= 8
                 and not label.lower().startswith("http")):
             metrics.append((label, value))
+
+    # Last-resort: if no metrics parsed but body has content with colons,
+    # try splitting on capital-letter word boundaries (handles run-on lines)
+    if not metrics and body.strip() and ":" in body:
+        run_on = re.sub(r"\s+", " ", body.replace("\n", " ")).strip()
+        # Split before sequences like "SomeLabel:" that follow a value
+        chunks = re.split(r'(?<=[a-z0-9%])\s+(?=[A-Z][a-zA-Z\s]{2,30}:)', run_on)
+        for chunk in chunks:
+            chunk = chunk.strip()
+            if ":" not in chunk:
+                continue
+            p = chunk.split(":", 1)
+            lbl = p[0].strip().strip("*")
+            val = p[1].strip().strip("*")
+            val = re.sub(r"\s*\([^)]{0,80}\)\s*$", "", val).strip()
+            if lbl and val and len(lbl.split()) <= 8:
+                metrics.append((lbl, val))
+            if len(metrics) == 3:
+                break
 
     if not metrics:
         st.markdown(sanitise_for_streamlit(body))
