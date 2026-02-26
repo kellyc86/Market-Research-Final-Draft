@@ -55,7 +55,8 @@ LLM_DESCRIPTIONS = {
 DEFAULT_TEMPERATURE = 0.2          # Lower = more deterministic, source-faithful outputs
 MAX_WIKI_RESULTS = 10              # Pages fetched per search query
 FINAL_SOURCE_COUNT = 5             # Sources used in the final report
-MAX_REPORT_WORDS = 480             # Soft target leaving buffer below the 500-word limit
+MAX_REPORT_WORDS = 500             # Hard ceiling aligned with assignment requirement
+REPORT_WORD_TARGET = 430           # Soft target: leaves buffer below limit for safety
 HARD_WORD_LIMIT = 500              # Enforced programmatically after generation
 WIKI_CONTENT_CHARS = 8000          # Characters extracted per Wikipedia page
 NUM_SEARCH_QUERIES = 5             # Number of search queries the LLM generates
@@ -671,7 +672,7 @@ def generate_report(
          "inventing a number. It is far better to admit missing data "
          "than to fabricate a statistic.\n\n"
          "================================ WORD LIMIT\n"
-         "Maximum: {max_words} words. Target range: 430-480 words.\n"
+         "Maximum: {max_words} words. Target range: {max_words_target}-{max_words} words.\n"
          "If output exceeds {max_words} words, rewrite more concisely.\n\n"
          "================================ MANDATORY STRUCTURE\n"
          "Use markdown headings (##) followed by a NEWLINE, then the "
@@ -754,6 +755,7 @@ def generate_report(
         "industry": industry,
         "sources": source_material,
         "max_words": MAX_REPORT_WORDS,
+        "max_words_target": REPORT_WORD_TARGET,
         "source_titles": titles_str,
     })
 
@@ -828,6 +830,7 @@ def inject_custom_css():
     st.markdown("""
     <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700&family=DM+Sans:wght@400;500;600&display=swap');
 
     /* ── Global Typography ── */
     .report-section, .insight-callout, .takeaway-box,
@@ -1080,8 +1083,6 @@ def inject_custom_css():
     }
 
     /* ── Upgraded Typography ── */
-    @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700&family=DM+Sans:wght@400;500;600&display=swap');
-
     .report-header h2 {
         font-family: 'Playfair Display', 'Georgia', serif !important;
         letter-spacing: -0.01em;
