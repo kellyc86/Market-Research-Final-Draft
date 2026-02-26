@@ -1654,7 +1654,6 @@ def render_styled_table(table_data: list[list[str]]):
     correctly and sometimes do not, depending on surrounding content.
     """
     if not table_data or len(table_data) < 2:
-        st.info("Table data not available.")
         return
 
     headers = table_data[0]
@@ -1724,6 +1723,26 @@ def render_report_section(heading: str, body: str):
                 f'</div>',
                 unsafe_allow_html=True,
             )
+            return
+
+        # For Key Data: check table exists BEFORE rendering the heading.
+        # If the table is missing (truncated or not generated), skip the
+        # entire section silently rather than showing an empty header.
+        if clean_heading == "Key Data":
+            if not body:
+                return
+            pre_text, table_data, post_text = extract_table_from_body(body)
+            if not table_data:
+                return  # No table -- hide the section entirely
+            st.markdown(
+                f'<div class="report-section"><h3>{clean_heading}</h3></div>',
+                unsafe_allow_html=True,
+            )
+            if pre_text:
+                st.markdown(sanitise_for_streamlit(pre_text))
+            render_styled_table(table_data)
+            if post_text:
+                st.markdown(sanitise_for_streamlit(post_text))
             return
 
         st.markdown(
