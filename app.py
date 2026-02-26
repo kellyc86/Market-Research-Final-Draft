@@ -839,7 +839,32 @@ def generate_report(
 
     report = sanitise_for_streamlit(report)
 
-    # Hard word limit enforced after generation -- the prompt alone is not sufficient
+    # If the report is over the prose word limit, ask the LLM to condense it.
+    # This preserves all sections and good content -- it trims fluff and
+    # redundancy rather than blindly dropping lines from the bottom.
+    # enforce_word_limit() runs afterwards as a hard safety net in case the
+    # rewrite itself overshoots (LLMs are unreliable at self-counting).
+    if count_words(report) > HARD_WORD_LIMIT:
+        condense_prompt = ChatPromptTemplate.from_messages([
+            ("system",
+             "You are an expert editor. The report below exceeds the "
+             f"{HARD_WORD_LIMIT}-word prose limit. Rewrite it so the prose "
+             f"is under {HARD_WORD_LIMIT} words by:\n"
+             "- Cutting redundant or repetitive sentences\n"
+             "- Removing filler phrases ('it is important to note that', etc.)\n"
+             "- Tightening wordy constructions\n"
+             "- Keeping ALL section headings exactly as they are\n"
+             "- Keeping ALL source citations in parentheses\n"
+             "- Keeping the Key Data markdown table completely unchanged\n"
+             "- Keeping every section -- do NOT delete any section\n\n"
+             "Return ONLY the revised report, no commentary."),
+            ("human", "{report}"),
+        ])
+        condense_chain = condense_prompt | llm | StrOutputParser()
+        report = condense_chain.invoke({"report": report})
+        report = sanitise_for_streamlit(report)
+
+    # Hard safety net -- if LLM rewrite still overshoots, drop lines from end
     report = enforce_word_limit(report, HARD_WORD_LIMIT)
 
     return report
