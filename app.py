@@ -1199,8 +1199,13 @@ def render_step_1(llm, model_name: str = "", api_key: str = ""):
         "terms — for example, *'pharma'*, *'AI'*, or *'renewables'*."
     )
 
+    # Pre-fill the text box with whatever is in session state — this ensures
+    # that when a related industry chip is clicked and sets industry_input,
+    # the text box reflects the new industry rather than the previous entry.
+    prefill = st.session_state.get("industry_input", "")
     industry = st.text_input(
         "Industry name",
+        value=prefill,
         placeholder="e.g. Renewable Energy, Semiconductor Manufacturing, Fintech",
         key="industry_text_input",
     )
@@ -1840,11 +1845,17 @@ def render_related_industries(llm, industry: str):
         for col, item in zip(cols, row_items):
             with col:
                 if st.button(f"→ {item}", key=f"related_{item}", use_container_width=True):
-                    # Reset the pipeline and pre-load the selected industry
+                    # Reset the pipeline, clear related industries cache so the
+                    # new industry gets its own suggestions, then jump straight
+                    # to retrieval — the industry is already validated by the LLM
+                    # that generated this list, so no need to re-validate it.
                     reset_pipeline()
                     st.session_state.industry_input = item
                     st.session_state.validated_industry = item
                     st.session_state.current_step = 2
+                    # Clear related industries so new ones are generated for the new industry
+                    st.session_state.pop("related_industries", None)
+                    st.session_state.pop("related_for", None)
                     st.rerun()
 
 
