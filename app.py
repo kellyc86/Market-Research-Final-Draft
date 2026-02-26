@@ -521,18 +521,14 @@ def generate_related_industries(llm, industry: str) -> list[str]:
 
 
 def enforce_word_limit(text: str, limit: int = HARD_WORD_LIMIT) -> str:
-    """Enforce the hard prose word limit, always preserving the Key Data table.
+    """Hard safety net: trim prose to limit while preserving all section structure.
 
-    Uses count_words() directly so truncation and the displayed counter are
-    guaranteed to agree -- they call the same function on the same text.
-
-    Algorithm:
-    1. Separate table rows from prose lines.
-    2. If prose is already within limit, reassemble and return.
-    3. Otherwise drop prose lines from the end until count_words reports
-       we are at or below the limit, then reattach the table in full.
+    Extracts the Key Data table first (pipe rows), then trims individual
+    sentences from section bodies -- shortest sections last, longest first --
+    until count_words() reports <= limit. Table is always reattached in full.
+    This is only reached if the LLM condensing pass still overshoots.
     """
-    # Split into prose and table lines
+    # Step 1: pull out ALL table rows so they are never touched
     prose_lines = []
     table_lines = []
     for line in text.split("\n"):
@@ -542,36 +538,63 @@ def enforce_word_limit(text: str, limit: int = HARD_WORD_LIMIT) -> str:
         else:
             prose_lines.append(line)
 
-    def prose_as_text(lines):
-        return "\n".join(lines)
+    prose = "\n".join(prose_lines)
 
-    # Already within limit -- just put the table back and return
-    if count_words(prose_as_text(prose_lines)) <= limit:
-        result = prose_as_text(prose_lines).strip()
-        if table_lines:
-            result += "\n\n" + "\n".join(table_lines)
-        return result.strip()
+    # Already fine -- reattach table and return
+    if count_words(prose) <= limit:
+        return (prose.strip() + ("\n\n" + "\n".join(table_lines) if table_lines else "")).strip()
 
-    # Drop lines from the end until we are within the limit.
-    # This is safe because the LLM puts the table at the end --
-    # prose sections come first, so dropping tail lines removes
-    # content from the last section (Strategic Interpretation /
-    # Final Takeaway) rather than from earlier important sections.
-    while prose_lines and count_words(prose_as_text(prose_lines)) > limit:
-        prose_lines.pop()
+    # Step 2: split prose into sections, trim one sentence at a time from the
+    # end of the longest section until we are under the limit.
+    # Find section boundaries by looking for ## headings.
+    section_pattern = re.compile(r'(^#{1,3}\s+.+$)', re.MULTILINE)
+    parts = section_pattern.split(prose)
+    # parts alternates: [pre-heading text, heading, body, heading, body, ...]
 
-    # Snap the last remaining line to a sentence boundary so we
-    # don't end mid-sentence
-    if prose_lines:
-        last = prose_lines[-1]
-        last_period = last.rfind(".")
+    # Build list of (heading, body) blocks preserving order
+    blocks = []  # list of [heading_or_none, body_text]
+    i = 0
+    if parts and not section_pattern.match(parts[0].strip()):
+        blocks.append(["", parts[0]])
+        i = 1
+    while i < len(parts):
+        heading = parts[i] if i < len(parts) else ""
+        body = parts[i + 1] if i + 1 < len(parts) else ""
+        blocks.append([heading, body])
+        i += 2
+
+    # Trim sentences one at a time from the body with the most words
+    # until we are under the limit -- never touch headings or Key Data
+    max_iterations = 200
+    iteration = 0
+    while count_words("\n".join(h + b for h, b in blocks)) > limit and iteration < max_iterations:
+        iteration += 1
+        # Find the longest body that isn't Key Data or Final Takeaway
+        longest_idx = -1
+        longest_wc = 0
+        for idx, (heading, body) in enumerate(blocks):
+            if any(k in heading for k in ("Key Data", "Key Metrics", "Final Takeaway")):
+                continue
+            wc = count_words(body)
+            if wc > longest_wc:
+                longest_wc = wc
+                longest_idx = idx
+
+        if longest_idx == -1:
+            break  # Nothing left to trim safely
+
+        body = blocks[longest_idx][1]
+        # Remove the last sentence from this body
+        last_period = body.rstrip().rfind(".")
         if last_period > 0:
-            prose_lines[-1] = last[:last_period + 1]
+            blocks[longest_idx][1] = body[:last_period + 1].rstrip()
+        else:
+            # No sentence boundary -- trim last word
+            words = body.split()
+            blocks[longest_idx][1] = " ".join(words[:-1])
 
-    result = prose_as_text(prose_lines).strip()
-    if table_lines:
-        result += "\n\n" + "\n".join(table_lines)
-    return result.strip()
+    prose = "\n".join(h + b for h, b in blocks)
+    return (prose.strip() + ("\n\n" + "\n".join(table_lines) if table_lines else "")).strip()
 
 
 def count_words(text: str) -> int:
