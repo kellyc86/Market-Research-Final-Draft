@@ -56,8 +56,9 @@ DEFAULT_TEMPERATURE = 0.2          # Lower = more deterministic, source-faithful
 MAX_WIKI_RESULTS = 10              # Pages fetched per search query
 FINAL_SOURCE_COUNT = 5             # Sources used in the final report
 MAX_REPORT_WORDS = 500             # Hard ceiling aligned with assignment requirement
-REPORT_WORD_TARGET = 430           # Soft target: leaves buffer below limit for safety
-HARD_WORD_LIMIT = 500              # Enforced programmatically after generation
+REPORT_WORD_TARGET = 420           # Soft target: leaves buffer for table rows below limit
+HARD_WORD_LIMIT = 600              # Programmatic limit -- higher than prose target to
+                                   # ensure the Key Data table is never truncated mid-row
 WIKI_CONTENT_CHARS = 8000          # Characters extracted per Wikipedia page
 NUM_SEARCH_QUERIES = 5             # Number of search queries the LLM generates
 
@@ -520,24 +521,73 @@ def generate_related_industries(llm, industry: str) -> list[str]:
 
 
 def enforce_word_limit(text: str, limit: int = HARD_WORD_LIMIT) -> str:
-    """Truncate generated text to the hard word limit at the nearest sentence boundary.
+    """Truncate generated text to the hard word limit, preserving complete tables.
 
-    LLMs routinely overshoot stated word limits -- the model predicts the next
-    token without tracking an accurate running count. Truncating to the nearest
-    full stop before the limit guarantees compliance without cutting mid-sentence.
-    The sentence-boundary check only applies when that boundary falls past the
-    halfway point, preventing excessive content loss from an early full stop.
+    LLMs routinely overshoot stated word limits. This function counts only
+    prose words (table pipe rows are excluded from the count, matching
+    count_words behaviour) and truncates at the nearest sentence boundary.
+    Crucially, if truncation would land inside a markdown table, it extends
+    to the end of that table so the table is never rendered half-cut.
     """
-    words = text.split()
-    if len(words) <= limit:
-        return text
+    # Count only prose words, matching count_words() logic
+    prose_lines = []
+    table_lines = []
+    in_table = False
+    for line in text.split("\n"):
+        stripped = line.strip()
+        is_table_row = stripped.startswith("|") and stripped.endswith("|")
+        if is_table_row:
+            in_table = True
+            table_lines.append(line)
+        else:
+            if in_table:
+                in_table = False
+            prose_lines.append(line)
 
-    truncated = " ".join(words[:limit])
-    last_period = truncated.rfind(".")
-    if last_period > len(truncated) * 0.5:
-        truncated = truncated[:last_period + 1]
+    prose_text = "\n".join(prose_lines)
+    prose_words = prose_text.split()
+    if len(prose_words) <= limit:
+        return text  # Under limit -- return untouched
 
-    return truncated
+    # Truncate prose at word boundary
+    truncated_prose = " ".join(prose_words[:limit])
+    last_period = truncated_prose.rfind(".")
+    if last_period > len(truncated_prose) * 0.5:
+        truncated_prose = truncated_prose[:last_period + 1]
+
+    # Rebuild: keep lines up to where prose truncation lands,
+    # then always include any table that immediately follows
+    result_lines = []
+    prose_budget = len(truncated_prose)
+    prose_so_far = 0
+    in_table_block = False
+    after_cutoff = False
+
+    for line in text.split("\n"):
+        stripped = line.strip()
+        is_table_row = stripped.startswith("|") and stripped.endswith("|")
+
+        if is_table_row:
+            if not after_cutoff or in_table_block:
+                # Include table rows that were in progress when limit hit
+                in_table_block = True
+                result_lines.append(line)
+            continue
+
+        if in_table_block and not is_table_row:
+            in_table_block = False
+            if after_cutoff:
+                break
+
+        if after_cutoff:
+            break
+
+        prose_so_far += len(line)
+        result_lines.append(line)
+        if prose_so_far >= prose_budget:
+            after_cutoff = True
+
+    return "\n".join(result_lines).strip()
 
 
 def count_words(text: str) -> int:
@@ -1098,20 +1148,15 @@ def inject_custom_css():
         margin-top: 0.5rem;
     }
     .related-chip {
-        background: #F0F6FC;
-        border: 1.5px solid #003A70;
-        color: #003A70;
-        border-radius: 20px;
-        padding: 0.4rem 1rem;
+        background: #EEF3F8;
+        border: none;
+        color: #444;
+        border-radius: 4px;
+        padding: 0.3rem 0.8rem;
         font-size: 13px;
-        font-weight: 500;
-        cursor: pointer;
-        transition: all 0.15s ease;
+        font-weight: 400;
+        cursor: default;
         white-space: nowrap;
-    }
-    .related-chip:hover {
-        background: #003A70;
-        color: #FFFFFF;
     }
 
     /* -- Upgraded Typography -- */
@@ -1867,8 +1912,8 @@ def render_related_industries(llm, industry: str):
 
     st.markdown(
         '<div class="related-section">'
-        '<h4>Explore Related Industries</h4>'
-        '<p class="related-subtitle">Search one of these in the box above to generate a new report</p>'
+        '<h4>Related Industries</h4>'
+        '<p class="related-subtitle">Type one of these into the search box above to generate a new report</p>'
         '</div>',
         unsafe_allow_html=True,
     )
