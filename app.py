@@ -55,10 +55,10 @@ LLM_DESCRIPTIONS = {
 DEFAULT_TEMPERATURE = 0.2          # Lower = more deterministic, source-faithful outputs
 MAX_WIKI_RESULTS = 10              # Pages fetched per search query
 FINAL_SOURCE_COUNT = 5             # Sources used in the final report
-MAX_REPORT_WORDS = 500             # Hard ceiling aligned with assignment requirement
-REPORT_WORD_TARGET = 420           # Soft target: leaves buffer for table rows below limit
-HARD_WORD_LIMIT = 600              # Programmatic limit -- higher than prose target to
-                                   # ensure the Key Data table is never truncated mid-row
+MAX_REPORT_WORDS = 500             # Hard prose ceiling aligned with assignment requirement
+REPORT_WORD_TARGET = 420           # Soft prose target: leaves buffer below the hard limit
+HARD_WORD_LIMIT = 500              # Enforced programmatically on prose only -- the Key Data
+                                   # table is excluded from the count and never truncated
 WIKI_CONTENT_CHARS = 8000          # Characters extracted per Wikipedia page
 NUM_SEARCH_QUERIES = 5             # Number of search queries the LLM generates
 
@@ -521,73 +521,52 @@ def generate_related_industries(llm, industry: str) -> list[str]:
 
 
 def enforce_word_limit(text: str, limit: int = HARD_WORD_LIMIT) -> str:
-    """Truncate generated text to the hard word limit, preserving complete tables.
+    """Enforce the hard word limit on prose, leaving the Key Data table intact.
 
-    LLMs routinely overshoot stated word limits. This function counts only
-    prose words (table pipe rows are excluded from the count, matching
-    count_words behaviour) and truncates at the nearest sentence boundary.
-    Crucially, if truncation would land inside a markdown table, it extends
-    to the end of that table so the table is never rendered half-cut.
+    Strategy:
+    1. Split the report into prose lines and table lines (pipe rows).
+    2. Apply the word limit ONLY to prose -- tables are structured data,
+       not free text, and must not be truncated or counted against the limit.
+    3. Reassemble: truncated prose + full table block appended at the end.
+
+    This guarantees the 500-word prose limit is always respected while
+    ensuring the Key Data table is always present in full.
     """
-    # Count only prose words, matching count_words() logic
+    lines = text.split("\n")
+
+    # Separate prose and table lines, recording where the table block sits
     prose_lines = []
-    table_lines = []
+    table_block_lines = []
     in_table = False
-    for line in text.split("\n"):
+
+    for line in lines:
         stripped = line.strip()
         is_table_row = stripped.startswith("|") and stripped.endswith("|")
         if is_table_row:
             in_table = True
-            table_lines.append(line)
+            table_block_lines.append(line)
         else:
-            if in_table:
-                in_table = False
+            in_table = False
             prose_lines.append(line)
 
+    # Apply word limit to prose only
     prose_text = "\n".join(prose_lines)
     prose_words = prose_text.split()
-    if len(prose_words) <= limit:
-        return text  # Under limit -- return untouched
 
-    # Truncate prose at word boundary
-    truncated_prose = " ".join(prose_words[:limit])
-    last_period = truncated_prose.rfind(".")
-    if last_period > len(truncated_prose) * 0.5:
-        truncated_prose = truncated_prose[:last_period + 1]
+    if len(prose_words) > limit:
+        truncated = " ".join(prose_words[:limit])
+        # Snap back to the nearest sentence boundary to avoid mid-sentence cuts
+        last_period = truncated.rfind(".")
+        if last_period > len(truncated) * 0.5:
+            truncated = truncated[:last_period + 1]
+        prose_text = truncated
 
-    # Rebuild: keep lines up to where prose truncation lands,
-    # then always include any table that immediately follows
-    result_lines = []
-    prose_budget = len(truncated_prose)
-    prose_so_far = 0
-    in_table_block = False
-    after_cutoff = False
+    # Reattach the table block after the prose (always in full, never truncated)
+    result = prose_text.strip()
+    if table_block_lines:
+        result += "\n\n" + "\n".join(table_block_lines)
 
-    for line in text.split("\n"):
-        stripped = line.strip()
-        is_table_row = stripped.startswith("|") and stripped.endswith("|")
-
-        if is_table_row:
-            if not after_cutoff or in_table_block:
-                # Include table rows that were in progress when limit hit
-                in_table_block = True
-                result_lines.append(line)
-            continue
-
-        if in_table_block and not is_table_row:
-            in_table_block = False
-            if after_cutoff:
-                break
-
-        if after_cutoff:
-            break
-
-        prose_so_far += len(line)
-        result_lines.append(line)
-        if prose_so_far >= prose_budget:
-            after_cutoff = True
-
-    return "\n".join(result_lines).strip()
+    return result.strip()
 
 
 def count_words(text: str) -> int:
@@ -737,8 +716,9 @@ def generate_report(
          "inventing a number. It is far better to admit missing data "
          "than to fabricate a statistic.\n\n"
          "================================ WORD LIMIT\n"
-         "Maximum: {max_words} words. Target range: {max_words_target}-{max_words} words.\n"
-         "If output exceeds {max_words} words, rewrite more concisely.\n\n"
+         "Maximum: {max_words} words for prose sections. Target: {max_words_target}-{max_words} words.\n"
+         "The Key Data table does NOT count toward the word limit -- include it in full.\n"
+         "If prose exceeds {max_words} words, rewrite more concisely.\n\n"
          "================================ MANDATORY STRUCTURE\n"
          "Use markdown headings (##) followed by a NEWLINE, then the "
          "section body on the NEXT line. Never put heading and body "
@@ -1983,9 +1963,9 @@ def render_step_3(llm, model_name: str = ""):
 
     wc = count_words(report)
     if wc <= HARD_WORD_LIMIT:
-        st.success(f"Word count: {wc} / {HARD_WORD_LIMIT}")
+        st.success(f"Prose word count: {wc} / {HARD_WORD_LIMIT} (Key Data table excluded)")
     else:
-        st.error(f"Word count: {wc} / {HARD_WORD_LIMIT} -- over limit")
+        st.error(f"Prose word count: {wc} / {HARD_WORD_LIMIT} -- over limit")
 
     st.markdown("---")
     sources_html = '<div class="sources-footer"><strong>References</strong><br>'
