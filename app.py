@@ -703,15 +703,17 @@ def generate_report(
          "Key insight, strategic implication, and recommendation in "
          "2-3 sentences.\n\n"
          "## Key Metrics\n"
-         "Extract exactly 3 key quantitative metrics from the sources. "
-         "Format EACH metric on its own line as:\n"
+         "Extract exactly 3 key quantitative metrics from the sources.\n"
+         "STRICT FORMAT — each metric on its own line, nothing else on that line:\n"
          "LABEL: value\n\n"
-         "Example:\n"
-         "Global Market Size: USD 1.5 trillion (2024)\n"
+         "CORRECT example (follow this exactly):\n"
+         "Global Market Size: USD 1.5 trillion\n"
          "Annual Growth Rate: 8.2% CAGR\n"
          "Market Concentration: Top 5 firms hold 45% share\n\n"
-         "If quantitative data is scarce, use the best available figures. "
-         "Always include the source page title in parentheses.\n\n"
+         "WRONG (do NOT add source citations or extra text on these lines):\n"
+         "Global Market Size: USD 1.5 trillion (Semiconductor industry)\n\n"
+         "Rules: exactly 3 lines, each line is ONLY 'Label: Value', "
+         "no bullets, no numbering, no parentheses, no extra words.\n\n"
          "## Industry Overview\n"
          "Definition, scope, and scale indicators.\n\n"
          "## Market Structure & Competitive Dynamics\n"
@@ -722,13 +724,21 @@ def generate_report(
          "## Risks & Constraints\n"
          "Regulatory, structural, and operational risks.\n\n"
          "## Key Data\n"
-         "Include a compact markdown table summarising the most "
-         "decision-relevant quantitative figures found in the sources. "
-         "The table MUST have each row on its own line. Example:\n"
+         "Include a markdown table with AT LEAST 4 data rows (not counting "
+         "the header) summarising the most decision-relevant quantitative "
+         "figures found in the sources.\n"
+         "STRICT FORMAT — every row on its own line, pipe character at "
+         "start and end of every line:\n"
          "| Metric | Value | Source |\n"
          "| --- | --- | --- |\n"
-         "| Revenue | US50B | Page title |\n\n"
-         "If no quantitative data is available, state this explicitly.\n\n"
+         "| Global market size | USD 580 billion | Semiconductor industry |\n"
+         "| Annual growth rate | 8.2% CAGR | Semiconductor industry |\n"
+         "| Leading market | United States (47% share) | Semiconductor industry |\n"
+         "| Key players | TSMC, Samsung, Intel | Semiconductor industry |\n\n"
+         "Rules: minimum 4 rows, each row on its own line, "
+         "never put the whole table on one line.\n"
+         "If fewer than 4 quantitative figures exist in the sources, "
+         "use qualitative descriptors in the Value column instead.\n\n"
          "## Strategic Interpretation\n"
          "Explain what the findings mean for decision-makers. Do not "
          "repeat numbers. Interpret them.\n\n"
@@ -1495,16 +1505,23 @@ def render_kpi_cards(body: str):
     """
     metrics = []
     for line in body.strip().split("\n"):
-        # Strip common LLM formatting noise: bullets, bold, numbering
+        # Strip bullets, bold markers, and number prefixes
         line = re.sub(r"^\s*[\-\*\•\d]+[\.\)]*\s*", "", line)
         line = line.strip().strip("*").strip()
-        if ":" in line and line:
-            parts = line.split(":", 1)
-            label = parts[0].strip().strip("*").strip()
-            value = parts[1].strip().strip("*").strip()
-            # Skip lines that are source citations like "(Source: Wikipedia)"
-            if label and value and len(label) < 60 and len(value) > 0:
-                metrics.append((label, value))
+        if ":" not in line or not line:
+            continue
+        parts = line.split(":", 1)
+        label = parts[0].strip().strip("*").strip()
+        value = parts[1].strip().strip("*").strip()
+        # Label should be short (a metric name, not a sentence)
+        # Value must exist and not be empty
+        # Skip lines where the label looks like a sentence or URL
+        if (label and value
+                and len(label) < 50
+                and len(label.split()) <= 6
+                and not label.startswith("http")
+                and len(value) > 0):
+            metrics.append((label, value))
 
     if not metrics:
         st.markdown(sanitise_for_streamlit(body))
