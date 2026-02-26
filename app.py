@@ -523,49 +523,61 @@ def generate_related_industries(llm, industry: str) -> list[str]:
 def enforce_word_limit(text: str, limit: int = HARD_WORD_LIMIT) -> str:
     """Enforce the hard word limit on prose, leaving the Key Data table intact.
 
-    Strategy:
-    1. Split the report into prose lines and table lines (pipe rows).
-    2. Apply the word limit ONLY to prose -- tables are structured data,
-       not free text, and must not be truncated or counted against the limit.
-    3. Reassemble: truncated prose + full table block appended at the end.
-
-    This guarantees the 500-word prose limit is always respected while
-    ensuring the Key Data table is always present in full.
+    Counts words the same way count_words() does (stripping markdown symbols)
+    so the displayed word count and the truncation threshold are always aligned.
+    Table pipe rows are separated out first and reattached after truncation so
+    they are never counted and never cut.
     """
     lines = text.split("\n")
 
-    # Separate prose and table lines, recording where the table block sits
+    # Separate prose lines from table pipe rows
     prose_lines = []
     table_block_lines = []
-    in_table = False
-
     for line in lines:
         stripped = line.strip()
-        is_table_row = stripped.startswith("|") and stripped.endswith("|")
-        if is_table_row:
-            in_table = True
+        if stripped.startswith("|") and stripped.endswith("|"):
             table_block_lines.append(line)
         else:
-            in_table = False
             prose_lines.append(line)
 
-    # Apply word limit to prose only
-    prose_text = "\n".join(prose_lines)
-    prose_words = prose_text.split()
+    # Count prose words using the same logic as count_words()
+    def _count(t):
+        c = re.sub(r"[#*|]", "", t)
+        c = re.sub(r"-{3,}", "", c)
+        c = re.sub(r"\s+", " ", c).strip()
+        return len(c.split()) if c else 0
 
-    if len(prose_words) > limit:
-        truncated = " ".join(prose_words[:limit])
-        # Snap back to the nearest sentence boundary to avoid mid-sentence cuts
-        last_period = truncated.rfind(".")
-        if last_period > len(truncated) * 0.5:
-            truncated = truncated[:last_period + 1]
-        prose_text = truncated
+    if _count("\n".join(prose_lines)) <= limit:
+        # Already within limit -- just reattach table and return
+        result = "\n".join(prose_lines).strip()
+        if table_block_lines:
+            result += "\n\n" + "\n".join(table_block_lines)
+        return result.strip()
 
-    # Reattach the table block after the prose (always in full, never truncated)
-    result = prose_text.strip()
+    # Truncate prose line by line until we're under the limit
+    kept_lines = []
+    running_count = 0
+    for line in prose_lines:
+        line_count = _count(line)
+        if running_count + line_count > limit:
+            # This line would push us over -- include only up to the limit
+            # by finding the last sentence boundary we can fit
+            words_left = limit - running_count
+            clean_line = re.sub(r"[#*|]", "", line).strip()
+            words = clean_line.split()
+            partial = " ".join(words[:words_left])
+            last_period = partial.rfind(".")
+            if last_period > len(partial) * 0.5:
+                partial = partial[:last_period + 1]
+            if partial.strip():
+                kept_lines.append(partial.strip())
+            break
+        kept_lines.append(line)
+        running_count += line_count
+
+    result = "\n".join(kept_lines).strip()
     if table_block_lines:
         result += "\n\n" + "\n".join(table_block_lines)
-
     return result.strip()
 
 
@@ -1534,16 +1546,11 @@ def render_kpi_cards(body: str):
     the LLM produces -- one metric per line, run-on single line, bulleted,
     or numbered -- by normalising the body into candidate lines first.
     """
-    # Normalise body: if it looks like a run-on line (multiple colons, many words),
-    # split it at Title Case word boundaries so each metric becomes its own line.
-    normalised = body.strip()
-    if normalised.count(":") >= 2 and len(normalised.split("\n")) == 1:
-        # All on one line -- split before each Title-Case label
-        normalised = re.sub(
-            r'\s+(?=[A-Z][a-z][\w ]{1,40}:)',
-            "\n",
-            normalised,
-        )
+    # Normalise body: collapse to single string then split on metric boundaries.
+    # Handles both run-on single lines and normal newline-separated metrics.
+    # Strategy: find all "Label: Value" pairs using a broad pattern, regardless
+    # of whether they are on separate lines or jammed together.
+    normalised = re.sub(r"\s+", " ", body.replace("\n", " ")).strip()
 
     SKIP_PREFIXES = (
         "extract", "strict format", "correct", "wrong", "rules",
@@ -1551,22 +1558,30 @@ def render_kpi_cards(body: str):
         "output", "line format", "do not",
     )
 
+    # Extract all Label: Value pairs from the normalised string.
+    # Pattern: a label (1-8 words, no colon) followed by ': ' and a value
+    # (everything up to the next label pattern or end of string).
+    # This works whether metrics are on separate lines or run together.
+    pair_pattern = re.compile(
+        r'([A-Z][^:]{2,50}?)'          # Label: starts with capital, 3-50 chars
+        r':\s*'                          # colon separator
+        r'([^:]{3,120}?)'               # Value: 3-120 chars (non-greedy)
+        r'(?=\s+[A-Z][^:]{2,50}:|$)',   # lookahead: next label or end
+    )
+
     metrics = []
-    for line in normalised.split("\n"):
-        # Strip bullets, numbering, bold, hash markers
-        line = re.sub(r"^\s*[-*\d]+[.)]*\s*", "", line)
-        line = line.strip().strip("*").strip("#").strip()
-        if not line or ":" not in line:
-            continue
-        if any(line.lower().startswith(p) for p in SKIP_PREFIXES):
-            continue
-        parts = line.split(":", 1)
-        label = parts[0].strip().strip("*").strip()
-        value = parts[1].strip().strip("*").strip()
-        # Strip trailing parenthetical citations e.g. "(Semiconductor industry)"
+    for match in pair_pattern.finditer(normalised):
+        label = match.group(1).strip().strip("*").strip("#")
+        value = match.group(2).strip().strip("*")
+        # Strip trailing parenthetical citations
         value = re.sub(r"\s*\([^)]{0,80}\)\s*$", "", value).strip()
+        # Skip instruction-echo lines
+        if any(label.lower().startswith(p) for p in SKIP_PREFIXES):
+            continue
         if label and value and len(label.split()) <= 8:
             metrics.append((label, value))
+        if len(metrics) == 5:
+            break
 
     # If still empty, fall back to plain markdown
     if not metrics:
