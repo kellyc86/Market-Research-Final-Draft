@@ -16,7 +16,7 @@ of missing important sub-topics that a single query would overlook.
 
 Grounding is enforced through prompt constraints and low temperature (0.2),
 which pushes the model toward deterministic, source-faithful completions.
-Temperature alone does not eliminate hallucination — it only shifts the
+Temperature alone does not eliminate hallucination -- it only shifts the
 probability distribution toward more conservative outputs. A programmatic
 word-limit check runs after generation as a hard backstop, since LLMs are
 unreliable at self-counting tokens.
@@ -33,9 +33,9 @@ from langchain_core.output_parsers import StrOutputParser
 from fpdf import FPDF
 
 
-# ──────────────────────────────────────────────────────────────
+# --------------------------------------------------------------
 # CONFIGURATION
-# ──────────────────────────────────────────────────────────────
+# --------------------------------------------------------------
 APP_TITLE = "Market Research Assistant"
 APP_ICON = ":material/query_stats:"
 LLM_OPTIONS = [
@@ -47,10 +47,10 @@ LLM_MODEL_MAP = {
     "Gemini 2.5 Pro": "gemini-2.5-pro",
 }
 LLM_DESCRIPTIONS = {
-    "Gemini 2.5 Flash": "Fast & free — great for quick reports",
-    "Gemini 2.5 Pro": "Most capable Gemini — best report quality",
+    "Gemini 2.5 Flash": "Fast & free -- great for quick reports",
+    "Gemini 2.5 Pro": "Most capable Gemini -- best report quality",
 }
-# Pipeline tuning parameters — balance retrieval breadth against API cost.
+# Pipeline tuning parameters -- balance retrieval breadth against API cost.
 # Values were settled through repeated testing across a range of industry queries.
 DEFAULT_TEMPERATURE = 0.2          # Lower = more deterministic, source-faithful outputs
 MAX_WIKI_RESULTS = 10              # Pages fetched per search query
@@ -62,16 +62,16 @@ WIKI_CONTENT_CHARS = 8000          # Characters extracted per Wikipedia page
 NUM_SEARCH_QUERIES = 5             # Number of search queries the LLM generates
 
 
-# ──────────────────────────────────────────────────────────────
-# HELPER FUNCTIONS — modular pipeline stages
-# ──────────────────────────────────────────────────────────────
+# --------------------------------------------------------------
+# HELPER FUNCTIONS -- modular pipeline stages
+# --------------------------------------------------------------
 
 def handle_api_error(e: Exception, context: str = "Operation") -> None:
     """Surface a user-friendly message for common Google Gemini API errors.
 
     Raw API error strings are noisy and unhelpful for non-technical users.
-    Pattern-matching on the error message maps known failure modes — bad
-    key, quota exhaustion, missing model — to actionable guidance.
+    Pattern-matching on the error message maps known failure modes -- bad
+    key, quota exhaustion, missing model -- to actionable guidance.
     """
     error_msg = str(e).lower()
     if "api key" in error_msg or "api_key" in error_msg or "authentication" in error_msg:
@@ -115,8 +115,8 @@ def _cached_validate_industry(model_name: str, api_key: str, user_input: str) ->
 
     Validation makes an LLM call for every submission, even if the user
     types the same industry twice in a session. Caching by (model, key, input)
-    means repeat submissions — common when users tweak capitalisation or
-    re-run — hit the cache instantly instead of spending 1-2 seconds on
+    means repeat submissions -- common when users tweak capitalisation or
+    re-run -- hit the cache instantly instead of spending 1-2 seconds on
     an API round-trip. TTL of one hour prevents stale results across
     very long sessions.
     """
@@ -132,7 +132,7 @@ def _cached_validate_industry(model_name: str, api_key: str, user_input: str) ->
 def _cached_generate_search_queries(model_name: str, api_key: str, industry: str) -> list[str]:
     """Cached wrapper around query generation.
 
-    The same industry name always produces the same set of five queries —
+    The same industry name always produces the same set of five queries --
     the output is deterministic at temperature 0.2. Caching this call
     saves another 1-2 seconds on re-runs and on the common case where
     the user goes back and re-generates after reading the sources.
@@ -149,9 +149,9 @@ def validate_industry(llm, user_input: str) -> dict:
     """Use the LLM to determine whether the user's input names a real industry.
 
     Simple string matching would miss abbreviations, informal names, and
-    misspellings. LLM-based validation handles these naturally — 'pharma'
+    misspellings. LLM-based validation handles these naturally -- 'pharma'
     normalises to 'Pharmaceutical Industry', 'AI' to 'Artificial Intelligence
-    Industry' — while still rejecting company names, person names, and
+    Industry' -- while still rejecting company names, person names, and
     freeform text.
 
     Returns a dict: is_valid (bool), normalised name (str), reason (str).
@@ -169,7 +169,7 @@ def validate_industry(llm, user_input: str) -> dict:
          "VALID examples: semiconductor manufacturing, renewable energy, "
          "pharmaceutical, fast fashion, fintech, automotive, agriculture, "
          "telecommunications, e-commerce, cybersecurity.\n\n"
-         "VALID even if informal — normalise to the standard name:\n"
+         "VALID even if informal -- normalise to the standard name:\n"
          "  'cars' -> Automotive Industry\n"
          "  'AI' -> Artificial Intelligence Industry\n"
          "  'tech' -> Technology Industry\n"
@@ -190,7 +190,7 @@ def validate_industry(llm, user_input: str) -> dict:
     chain = prompt | llm | StrOutputParser()
     response = chain.invoke({"input": user_input})
 
-    # Normalise the raw response before parsing — LLMs occasionally use
+    # Normalise the raw response before parsing -- LLMs occasionally use
     # en-dashes, smart quotes, or other Unicode in their output even when
     # following a strict format. ASCII-safe substitutions prevent crashes
     # in the startswith() comparisons below.
@@ -238,8 +238,8 @@ def generate_search_queries(llm, industry: str) -> list[str]:
 
     A single query (e.g. 'renewable energy') tends to surface the same
     high-level overview page repeatedly. Prompting the LLM to produce
-    queries targeting distinct aspects — market size, regulation, key
-    companies, technology — retrieves a more diverse candidate pool.
+    queries targeting distinct aspects -- market size, regulation, key
+    companies, technology -- retrieves a more diverse candidate pool.
     This mirrors the intuition behind ensemble methods: combining varied
     weak signals produces a stronger result than any single signal alone.
     """
@@ -254,7 +254,7 @@ def generate_search_queries(llm, industry: str) -> list[str]:
          "3. Key technology or innovation in the industry\n"
          "4. Regulation, policy, or risks in the industry\n"
          "5. Major companies or competitive landscape\n\n"
-         "IMPORTANT: Format each query as a Wikipedia article title — "
+         "IMPORTANT: Format each query as a Wikipedia article title -- "
          "use proper capitalisation and standard encyclopaedic naming.\n"
          "GOOD: 'Semiconductor industry', 'Automotive safety'\n"
          "BAD: 'semiconductor market size trends 2024'\n\n"
@@ -307,7 +307,7 @@ def retrieve_wikipedia_pages(industry: str, queries: list[str]) -> list[dict]:
     """Retrieve Wikipedia pages for all queries in parallel, deduplicated by title.
 
     Sequential retrieval (one query at a time) is the main bottleneck in the
-    pipeline — each Wikipedia API call takes 1-3 seconds and they have no
+    pipeline -- each Wikipedia API call takes 1-3 seconds and they have no
     dependency on each other. Running them concurrently with a thread pool
     cuts retrieval time by roughly 4-5x for five queries, since the wall-clock
     time is determined by the slowest single request rather than the sum of all.
@@ -337,7 +337,7 @@ def select_top_pages(
     """Use the LLM to rank retrieved pages and select the five most relevant.
 
     Without this filtering step, broad retrieval often returns tangentially
-    related pages — a founder biography, a geographic region article — that
+    related pages -- a founder biography, a geographic region article -- that
     would dilute the report. The LLM sees each page's title and a short snippet,
     then returns the indices of the five pages most useful for a market research
     report. This is an LLM-as-reranker pattern: cheap to run, but meaningfully
@@ -346,7 +346,7 @@ def select_top_pages(
     if len(pages) <= FINAL_SOURCE_COUNT:
         return pages
 
-    # Build a numbered list of candidates — title + snippet — for the LLM to evaluate
+    # Build a numbered list of candidates -- title + snippet -- for the LLM to evaluate
     candidate_descriptions = ""
     for i, page in enumerate(pages):
         snippet = page["content"][:600]
@@ -412,10 +412,10 @@ def filter_low_quality_pages(pages: list[dict]) -> list[dict]:
     """Remove Wikipedia stub pages and disambiguation pages before LLM ranking.
 
     Two failure modes degrade report quality without this filter:
-    1. Stub pages — Wikipedia articles under ~300 words that contain
+    1. Stub pages -- Wikipedia articles under ~300 words that contain
        almost no substantive content. Passing these to the LLM ranker
        wastes ranking capacity on pages that would be useless as sources.
-    2. Disambiguation pages — pages that only list alternative meanings
+    2. Disambiguation pages -- pages that only list alternative meanings
        of a term. These contain no industry content at all and are
        identifiable by the presence of 'may refer to' in the opening text.
 
@@ -432,7 +432,7 @@ def filter_low_quality_pages(pages: list[dict]) -> list[dict]:
         # Reject disambiguation pages
         if "may refer to" in content[:300].lower():
             continue
-        # Reject stubs — too short to contain useful market data
+        # Reject stubs -- too short to contain useful market data
         if len(content) < MIN_CONTENT_LENGTH:
             continue
         filtered.append(page)
@@ -445,8 +445,8 @@ def filter_low_quality_pages(pages: list[dict]) -> list[dict]:
 def check_source_diversity(pages: list[dict]) -> dict:
     """Measure content overlap between retrieved pages using Jaccard similarity.
 
-    Jaccard similarity between two sets A and B is |A ∩ B| / |A ∪ B|.
-    Applied to word sets, it flags when pages share too much vocabulary —
+    Jaccard similarity between two sets A and B is |A intersection B| / |A union B|.
+    Applied to word sets, it flags when pages share too much vocabulary --
     a sign that multiple sources cover the same narrow sub-topic rather than
     providing complementary perspectives. High overlap tends to produce
     shallow, repetitive reports. The 0.4 threshold was chosen empirically:
@@ -472,7 +472,7 @@ def check_source_diversity(pages: list[dict]) -> dict:
                 overlaps.append(len(intersection) / len(union))
 
     avg_overlap = sum(overlaps) / len(overlaps) if overlaps else 0.0
-    # Require two or more high-overlap pairs to trigger the warning —
+    # Require two or more high-overlap pairs to trigger the warning --
     # a single coincidental match should not penalise otherwise diverse sources
     high_overlap_count = sum(1 for o in overlaps if o > 0.4)
 
@@ -493,7 +493,7 @@ def check_source_diversity(pages: list[dict]) -> dict:
 def generate_related_industries(llm, industry: str) -> list[str]:
     """Generate a list of related industries for deeper research suggestions.
 
-    A good analyst does not stop at a single industry in isolation — adjacent
+    A good analyst does not stop at a single industry in isolation -- adjacent
     sectors often explain demand dynamics, supply chain dependencies, or
     competitive threats that shape the focal industry. For example, researching
     Electric Vehicles naturally connects to Battery Manufacturing, Semiconductor
@@ -522,7 +522,7 @@ def generate_related_industries(llm, industry: str) -> list[str]:
 def enforce_word_limit(text: str, limit: int = HARD_WORD_LIMIT) -> str:
     """Truncate generated text to the hard word limit at the nearest sentence boundary.
 
-    LLMs routinely overshoot stated word limits — the model predicts the next
+    LLMs routinely overshoot stated word limits -- the model predicts the next
     token without tracking an accurate running count. Truncating to the nearest
     full stop before the limit guarantees compliance without cutting mid-sentence.
     The sentence-boundary check only applies when that boundary falls past the
@@ -586,7 +586,7 @@ HEADING_LABELS = [
 def split_report_into_sections(report: str) -> list[tuple[str, str]]:
     """Split a report string into (heading, body) tuples.
 
-    LLMs are inconsistent with heading formatting — the same model may output
+    LLMs are inconsistent with heading formatting -- the same model may output
     '## Executive Summary', '**Executive Summary**', or plain 'Executive Summary'
     across different runs. Rather than relying on a specific format, this function
     searches for the known heading label strings and uses their positions in the
@@ -595,7 +595,7 @@ def split_report_into_sections(report: str) -> list[tuple[str, str]]:
     report is returned as a single section.
     """
     # Matches any heading label regardless of ## markers, ** bold wrappers,
-    # or trailing colons — all of which LLMs produce inconsistently
+    # or trailing colons -- all of which LLMs produce inconsistently
     heading_positions = []
 
     for label in HEADING_LABELS:
@@ -636,13 +636,13 @@ def generate_report(
     The prompt balances two competing constraints: enforcing a fixed section
     structure while keeping every claim grounded in the retrieved sources.
     Good/bad examples in the prompt demonstrate what grounded output looks like
-    rather than just describing the rule — a few-shot approach that is more
+    rather than just describing the rule -- a few-shot approach that is more
     reliable than instruction alone.
 
     The word limit appears twice: as a soft instruction in the prompt and as a
     hard programmatic check after generation. The programmatic check is the
     reliable one. Dollar signs are prohibited in the prompt because Streamlit
-    renders $...$ as LaTeX math — this is also caught by sanitise_for_streamlit()
+    renders $...$ as LaTeX math -- this is also caught by sanitise_for_streamlit()
     as a fallback.
     """
     source_titles = [page["title"] for page in pages]
@@ -704,7 +704,7 @@ def generate_report(
          "2-3 sentences.\n\n"
          "## Key Metrics\n"
          "Extract exactly 3 key quantitative metrics from the sources.\n"
-         "STRICT FORMAT — each metric on its own line, nothing else on that line:\n"
+         "STRICT FORMAT -- each metric on its own line, nothing else on that line:\n"
          "LABEL: value\n\n"
          "CORRECT example (follow this exactly):\n"
          "Global Market Size: USD 1.5 trillion\n"
@@ -727,7 +727,7 @@ def generate_report(
          "Include a markdown table with AT LEAST 4 data rows (not counting "
          "the header) summarising the most decision-relevant quantitative "
          "figures found in the sources.\n"
-         "STRICT FORMAT — every row on its own line, pipe character at "
+         "STRICT FORMAT -- every row on its own line, pipe character at "
          "start and end of every line:\n"
          "| Metric | Value | Source |\n"
          "| --- | --- | --- |\n"
@@ -795,15 +795,15 @@ def generate_report(
 
     report = sanitise_for_streamlit(report)
 
-    # Hard word limit enforced after generation — the prompt alone is not sufficient
+    # Hard word limit enforced after generation -- the prompt alone is not sufficient
     report = enforce_word_limit(report, HARD_WORD_LIMIT)
 
     return report
 
 
-# ──────────────────────────────────────────────────────────────
-# SESSION STATE — manages the multi-step flow
-# ──────────────────────────────────────────────────────────────
+# --------------------------------------------------------------
+# SESSION STATE -- manages the multi-step flow
+# --------------------------------------------------------------
 
 def init_session_state():
     """Initialise session state variables on the first run.
@@ -840,15 +840,15 @@ def reset_pipeline():
     st.session_state.search_queries = []
 
 
-# ──────────────────────────────────────────────────────────────
+# --------------------------------------------------------------
 # STREAMLIT UI
-# ──────────────────────────────────────────────────────────────
+# --------------------------------------------------------------
 
 def inject_custom_css():
     """Inject custom CSS to style the report output professionally.
 
     Streamlit's default styling is functional but generic. Custom CSS creates
-    visual hierarchy that makes the report easier to scan — distinct treatments
+    visual hierarchy that makes the report easier to scan -- distinct treatments
     for the executive summary, KPI cards, data table, and conclusion help a
     reader quickly locate what matters.
     """
@@ -857,13 +857,13 @@ def inject_custom_css():
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
     @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700&family=DM+Sans:wght@400;500;600&display=swap');
 
-    /* ── Global Typography ── */
+    /* -- Global Typography -- */
     .report-section, .insight-callout, .takeaway-box,
     .kpi-card, .source-card, .report-header {
         font-family: 'Inter', 'Helvetica Neue', Arial, sans-serif;
     }
 
-    /* ── Report Section Cards ── */
+    /* -- Report Section Cards -- */
     .report-section {
         background: #FFFFFF;
         border-left: 4px solid #003A70;
@@ -883,7 +883,7 @@ def inject_custom_css():
         letter-spacing: -0.01em;
     }
 
-    /* ── Executive Summary — Insight Callout ── */
+    /* -- Executive Summary -- Insight Callout -- */
     .insight-callout {
         background: linear-gradient(135deg, #F0F6FC 0%, #E8F0FE 100%);
         border-left: 5px solid #003A70;
@@ -915,7 +915,7 @@ def inject_custom_css():
         font-size: 15px;
     }
 
-    /* ── Final Takeaway — Conclusion Box ── */
+    /* -- Final Takeaway -- Conclusion Box -- */
     .takeaway-box {
         background: #003A70;
         color: #FFFFFF;
@@ -946,7 +946,7 @@ def inject_custom_css():
         margin: 0.5rem 0 0 0;
     }
 
-    /* ── KPI Metric Cards ── */
+    /* -- KPI Metric Cards -- */
     .kpi-row {
         display: flex;
         gap: 1rem;
@@ -977,7 +977,7 @@ def inject_custom_css():
         letter-spacing: 0.5px;
     }
 
-    /* ── Styled Data Table ── */
+    /* -- Styled Data Table -- */
     .mckinsey-table {
         width: 100%;
         border-collapse: collapse;
@@ -1011,7 +1011,7 @@ def inject_custom_css():
         margin-top: 4px;
     }
 
-    /* ── Source Cards ── */
+    /* -- Source Cards -- */
     .source-card {
         background: #FFFFFF;
         border: 1px solid #E0E4E8;
@@ -1022,7 +1022,7 @@ def inject_custom_css():
         font-size: 14px;
     }
 
-    /* ── Report Header ── */
+    /* -- Report Header -- */
     .report-header {
         background: linear-gradient(135deg, #003A70 0%, #00578A 100%);
         color: white;
@@ -1054,7 +1054,7 @@ def inject_custom_css():
         margin-top: 8px;
     }
 
-    /* ── Source Citations Footer ── */
+    /* -- Source Citations Footer -- */
     .sources-footer {
         font-size: 12px;
         color: #888888;
@@ -1066,7 +1066,7 @@ def inject_custom_css():
         color: #0085CA;
     }
 
-    /* ── Related Industries ── */
+    /* -- Related Industries -- */
     .related-section {
         margin-top: 2rem;
         padding-top: 1.5rem;
@@ -1107,7 +1107,7 @@ def inject_custom_css():
         color: #FFFFFF;
     }
 
-    /* ── Upgraded Typography ── */
+    /* -- Upgraded Typography -- */
     .report-header h2 {
         font-family: 'Playfair Display', 'Georgia', serif !important;
         letter-spacing: -0.01em;
@@ -1198,15 +1198,15 @@ def render_step_1(llm, model_name: str = "", api_key: str = ""):
     """Step 1: Industry input and validation.
 
     Validation is LLM-powered so it handles informal names and abbreviations
-    gracefully. Invalid inputs show a helpful recovery UI — the reason the
-    LLM rejected the input plus a clickable list of example industries — so
+    gracefully. Invalid inputs show a helpful recovery UI -- the reason the
+    LLM rejected the input plus a clickable list of example industries -- so
     the user never hits a dead end.
     """
     st.header("Step 1: Enter an Industry")
     st.markdown(
         "Enter the name of an industry or economic sector to research. "
         "The assistant accepts standard names, abbreviations, and informal "
-        "terms — for example, *'pharma'*, *'AI'*, or *'renewables'*."
+        "terms -- for example, *'pharma'*, *'AI'*, or *'renewables'*."
     )
 
     industry = st.text_input(
@@ -1250,7 +1250,7 @@ def render_step_1(llm, model_name: str = "", api_key: str = ""):
                 st.caption(f"Reason: {reason}")
 
             st.markdown(
-                "Please enter a **specific industry name** — for example an "
+                "Please enter a **specific industry name** -- for example an "
                 "economic sector, market, or technology vertical. "
                 "Company names, product names, and general words are not accepted."
             )
@@ -1260,7 +1260,7 @@ def render_step_1(llm, model_name: str = "", api_key: str = ""):
                 + ", ".join(f"*{s}*" for s in INDUSTRY_SUGGESTIONS)
             )
 
-            if st.button("← Try again", type="secondary"):
+            if st.button("<- Try again", type="secondary"):
                 st.rerun()
 
     elif not industry:
@@ -1286,7 +1286,7 @@ def render_step_2(llm, model_name: str = "", api_key: str = ""):
                 raw_pages = retrieve_wikipedia_pages(industry, queries)
 
                 # If parallel retrieval returns nothing, fall back to a direct
-                # search on just the industry name — handles cases where LLM-
+                # search on just the industry name -- handles cases where LLM-
                 # generated queries are too specific and miss the main article.
                 if not raw_pages:
                     fallback_pages = retrieve_wikipedia_pages(industry, [industry])
@@ -1400,7 +1400,7 @@ def parse_markdown_table(text: str) -> list[list[str]] | None:
 
     Handles two formatting edge cases that LLMs produce:
     1. Normal: each row on its own line starting and ending with '|'
-    2. Single-line: the entire table concatenated onto one line — detected
+    2. Single-line: the entire table concatenated onto one line -- detected
        by a high pipe count combined with '---' separator markers.
 
     Returns None if no valid table (at least header + one data row) is found.
@@ -1499,14 +1499,14 @@ def render_kpi_cards(body: str):
 
     Parses 'LABEL: value' lines from the body. Handles bullet points,
     bold markers, and numbered prefixes that LLMs occasionally add.
-    Always renders exactly 3 cards — pads with 'N/A' if fewer than 3
+    Always renders exactly 3 cards -- pads with 'N/A' if fewer than 3
     metrics are found so the layout stays consistent.
     Falls back to plain markdown only if no colon-separated lines exist at all.
     """
     metrics = []
     for line in body.strip().split("\n"):
         # Strip bullets, bold markers, and number prefixes
-        line = re.sub(r"^\s*[\-\*\•\d]+[\.\)]*\s*", "", line)
+        line = re.sub(r"^\s*[\-\*\-\d]+[\.\)]*\s*", "", line)
         line = line.strip().strip("*").strip()
         if ":" not in line or not line:
             continue
@@ -1527,7 +1527,7 @@ def render_kpi_cards(body: str):
         st.markdown(sanitise_for_streamlit(body))
         return
 
-    # Always show exactly 3 cards — pad if LLM returned fewer
+    # Always show exactly 3 cards -- pad if LLM returned fewer
     metrics = metrics[:3]
     while len(metrics) < 3:
         metrics.append(("Data not available", "N/A"))
@@ -1550,7 +1550,7 @@ def render_styled_table(table_data: list[list[str]]):
     """Render a parsed table as styled HTML with a navy header and alternating rows.
 
     Rendered as HTML rather than via st.dataframe() because Streamlit's
-    markdown table support is inconsistent — pipe tables sometimes render
+    markdown table support is inconsistent -- pipe tables sometimes render
     correctly and sometimes do not, depending on surrounding content.
     """
     if not table_data or len(table_data) < 2:
@@ -1583,10 +1583,10 @@ def render_report_section(heading: str, body: str):
     """Render a single report section with visual treatment matched to its role.
 
     Different sections carry different cognitive weight for the reader:
-    - Executive Summary: first thing a reader scans — gets a highlighted callout
-    - Key Metrics: quantitative anchor points — gets large KPI number cards
-    - Final Takeaway: the conclusion — gets a bold navy box for emphasis
-    - Key Data: tabular data — rendered as styled HTML table
+    - Executive Summary: first thing a reader scans -- gets a highlighted callout
+    - Key Metrics: quantitative anchor points -- gets large KPI number cards
+    - Final Takeaway: the conclusion -- gets a bold navy box for emphasis
+    - Key Data: tabular data -- rendered as styled HTML table
     - All others: standard card with left border for visual grouping
     """
     clean_heading = heading.strip().strip("#").strip("*").strip()
@@ -1824,7 +1824,7 @@ def render_related_industries(llm, industry: str):
 
     Placing related industries at the end of the report encourages the user
     to explore adjacent sectors rather than stopping at a single data point.
-    Each chip is a Streamlit button — clicking it pre-fills the industry
+    Each chip is a Streamlit button -- clicking it pre-fills the industry
     input and resets the pipeline, turning the suggestion into a one-click
     follow-on search. Related industries are generated once and stored in
     session state so re-renders do not trigger additional LLM calls.
@@ -1852,7 +1852,7 @@ def render_related_industries(llm, industry: str):
         unsafe_allow_html=True,
     )
 
-    # Display related industries as plain styled text chips — no buttons,
+    # Display related industries as plain styled text chips -- no buttons,
     # which avoids Streamlit rerun conflicts. User reads them and types
     # their chosen industry into the search box above.
     chips_html = '<div class="related-grid">'
@@ -1919,7 +1919,7 @@ def render_step_3(llm, model_name: str = ""):
     if wc <= HARD_WORD_LIMIT:
         st.success(f"Word count: {wc} / {HARD_WORD_LIMIT}")
     else:
-        st.error(f"Word count: {wc} / {HARD_WORD_LIMIT} — over limit")
+        st.error(f"Word count: {wc} / {HARD_WORD_LIMIT} -- over limit")
 
     st.markdown("---")
     sources_html = '<div class="sources-footer"><strong>References</strong><br>'
@@ -1927,7 +1927,7 @@ def render_step_3(llm, model_name: str = ""):
         title = page.get("title", "Unknown")
         url = page.get("url", "")
         sources_html += (
-            f'[{i}] {title} — '
+            f'[{i}] {title} -- '
             f'<a href="{url}" target="_blank">Wikipedia</a><br>'
         )
     sources_html += (
@@ -1961,12 +1961,12 @@ def render_step_3(llm, model_name: str = ""):
                 file_name=f"{industry.lower().replace(' ', '_')}_report.txt",
                 mime="text/plain",
             )
-            st.caption("PDF generation failed — text version provided.")
+            st.caption("PDF generation failed -- text version provided.")
 
 
-# ──────────────────────────────────────────────────────────────
-# MAIN — application entry point
-# ──────────────────────────────────────────────────────────────
+# --------------------------------------------------------------
+# MAIN -- application entry point
+# --------------------------------------------------------------
 
 def main():
     """Entry point. Initialises state and routes the user through the pipeline.
