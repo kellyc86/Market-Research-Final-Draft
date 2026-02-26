@@ -521,74 +521,74 @@ def generate_related_industries(llm, industry: str) -> list[str]:
 
 
 def enforce_word_limit(text: str, limit: int = HARD_WORD_LIMIT) -> str:
-    """Enforce the hard word limit on prose, leaving the Key Data table intact.
+    """Enforce the hard prose word limit, always preserving the Key Data table.
 
-    Counts words the same way count_words() does (stripping markdown symbols)
-    so the displayed word count and the truncation threshold are always aligned.
-    Table pipe rows are separated out first and reattached after truncation so
-    they are never counted and never cut.
+    Uses count_words() directly so truncation and the displayed counter are
+    guaranteed to agree -- they call the same function on the same text.
+
+    Algorithm:
+    1. Separate table rows from prose lines.
+    2. If prose is already within limit, reassemble and return.
+    3. Otherwise drop prose lines from the end until count_words reports
+       we are at or below the limit, then reattach the table in full.
     """
-    lines = text.split("\n")
-
-    # Separate prose lines from table pipe rows
+    # Split into prose and table lines
     prose_lines = []
-    table_block_lines = []
-    for line in lines:
+    table_lines = []
+    for line in text.split("\n"):
         stripped = line.strip()
         if stripped.startswith("|") and stripped.endswith("|"):
-            table_block_lines.append(line)
+            table_lines.append(line)
         else:
             prose_lines.append(line)
 
-    # Count prose words using the same logic as count_words()
-    def _count(t):
-        c = re.sub(r"[#*|]", "", t)
-        c = re.sub(r"-{3,}", "", c)
-        c = re.sub(r"\s+", " ", c).strip()
-        return len(c.split()) if c else 0
+    def prose_as_text(lines):
+        return "\n".join(lines)
 
-    if _count("\n".join(prose_lines)) <= limit:
-        # Already within limit -- just reattach table and return
-        result = "\n".join(prose_lines).strip()
-        if table_block_lines:
-            result += "\n\n" + "\n".join(table_block_lines)
+    # Already within limit -- just put the table back and return
+    if count_words(prose_as_text(prose_lines)) <= limit:
+        result = prose_as_text(prose_lines).strip()
+        if table_lines:
+            result += "\n\n" + "\n".join(table_lines)
         return result.strip()
 
-    # Truncate prose line by line until we're under the limit
-    kept_lines = []
-    running_count = 0
-    for line in prose_lines:
-        line_count = _count(line)
-        if running_count + line_count > limit:
-            # This line would push us over -- include only up to the limit
-            # by finding the last sentence boundary we can fit
-            words_left = limit - running_count
-            clean_line = re.sub(r"[#*|]", "", line).strip()
-            words = clean_line.split()
-            partial = " ".join(words[:words_left])
-            last_period = partial.rfind(".")
-            if last_period > len(partial) * 0.5:
-                partial = partial[:last_period + 1]
-            if partial.strip():
-                kept_lines.append(partial.strip())
-            break
-        kept_lines.append(line)
-        running_count += line_count
+    # Drop lines from the end until we are within the limit.
+    # This is safe because the LLM puts the table at the end --
+    # prose sections come first, so dropping tail lines removes
+    # content from the last section (Strategic Interpretation /
+    # Final Takeaway) rather than from earlier important sections.
+    while prose_lines and count_words(prose_as_text(prose_lines)) > limit:
+        prose_lines.pop()
 
-    result = "\n".join(kept_lines).strip()
-    if table_block_lines:
-        result += "\n\n" + "\n".join(table_block_lines)
+    # Snap the last remaining line to a sentence boundary so we
+    # don't end mid-sentence
+    if prose_lines:
+        last = prose_lines[-1]
+        last_period = last.rfind(".")
+        if last_period > 0:
+            prose_lines[-1] = last[:last_period + 1]
+
+    result = prose_as_text(prose_lines).strip()
+    if table_lines:
+        result += "\n\n" + "\n".join(table_lines)
     return result.strip()
 
 
 def count_words(text: str) -> int:
-    """Count substantive words in a report, stripping markdown formatting symbols.
+    """Count substantive prose words, excluding table rows and markdown symbols.
 
-    Heading markers (##), bold/italic markers (* **), pipe characters (|),
-    and separator rows (---) are removed so the count reflects actual prose
-    content rather than formatting artefacts.
+    Table pipe rows (| col | col |) are excluded entirely because they are
+    structured data appended outside the prose word limit. Heading markers,
+    bold/italic markers, and separator rows are also stripped so the count
+    reflects only readable prose words.
     """
-    clean = re.sub(r"[#*|]", "", text)
+    # Remove table rows before counting
+    lines = [
+        line for line in text.split("\n")
+        if not (line.strip().startswith("|") and line.strip().endswith("|"))
+    ]
+    clean = "\n".join(lines)
+    clean = re.sub(r"[#*|]", "", clean)
     clean = re.sub(r"-{3,}", "", clean)
     clean = re.sub(r"\s+", " ", clean).strip()
     return len(clean.split()) if clean else 0
