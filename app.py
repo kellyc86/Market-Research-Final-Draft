@@ -1199,13 +1199,19 @@ def render_step_1(llm, model_name: str = "", api_key: str = ""):
         "terms — for example, *'pharma'*, *'AI'*, or *'renewables'*."
     )
 
-    # Pre-fill the text box with whatever is in session state — this ensures
-    # that when a related industry chip is clicked and sets industry_input,
-    # the text box reflects the new industry rather than the previous entry.
-    prefill = st.session_state.get("industry_input", "")
+    # Streamlit's text_input ignores `value` after first render when a key
+    # is set — writing directly to session state before the widget renders
+    # is the correct way to programmatically update a keyed text input.
+    if "industry_text_input" not in st.session_state:
+        st.session_state["industry_text_input"] = ""
+    # Sync the widget value from industry_input whenever it changes
+    # (e.g. when a suggestion button or related industry chip is clicked)
+    if st.session_state.get("industry_input", "") != st.session_state.get("_last_synced_input", ""):
+        st.session_state["industry_text_input"] = st.session_state.get("industry_input", "")
+        st.session_state["_last_synced_input"] = st.session_state.get("industry_input", "")
+
     industry = st.text_input(
         "Industry name",
-        value=prefill,
         placeholder="e.g. Renewable Energy, Semiconductor Manufacturing, Fintech",
         key="industry_text_input",
     )
@@ -1257,6 +1263,8 @@ def render_step_1(llm, model_name: str = "", api_key: str = ""):
                     if st.button(suggestion, key=f"suggest_{suggestion}", use_container_width=True):
                         reset_pipeline()
                         st.session_state.industry_input = suggestion
+                        st.session_state["industry_text_input"] = suggestion
+                        st.session_state["_last_synced_input"] = suggestion
                         with st.spinner(f"Validating '{suggestion}'..."):
                             try:
                                 if model_name and api_key:
@@ -1294,12 +1302,19 @@ def render_step_2(llm, model_name: str = "", api_key: str = ""):
 
                 raw_pages = retrieve_wikipedia_pages(industry, queries)
 
+                # If parallel retrieval returns nothing, fall back to a direct
+                # search on just the industry name — handles cases where LLM-
+                # generated queries are too specific and miss the main article.
                 if not raw_pages:
-                    st.error(
-                        "No Wikipedia pages found for this industry. "
-                        "Try a broader or more common industry name."
-                    )
-                    return
+                    fallback_pages = retrieve_wikipedia_pages(industry, [industry])
+                    if fallback_pages:
+                        raw_pages = fallback_pages
+                    else:
+                        st.error(
+                            "No Wikipedia pages found for this industry. "
+                            "Try a broader or more common industry name."
+                        )
+                        return
 
                 # Remove stubs and disambiguation pages before ranking
                 raw_pages = filter_low_quality_pages(raw_pages)
@@ -1499,24 +1514,34 @@ def extract_table_from_body(body: str) -> tuple[str, list[list[str]] | None, str
 def render_kpi_cards(body: str):
     """Render Key Metrics section as large KPI cards in a horizontal row.
 
-    Expects lines formatted as 'LABEL: value'. Renders up to three metrics
-    as styled cards. Falls back to plain markdown if no colon-separated
-    pairs are found.
+    Parses 'LABEL: value' lines from the body. Handles bullet points,
+    bold markers, and numbered prefixes that LLMs occasionally add.
+    Always renders exactly 3 cards — pads with 'N/A' if fewer than 3
+    metrics are found so the layout stays consistent.
+    Falls back to plain markdown only if no colon-separated lines exist at all.
     """
     metrics = []
     for line in body.strip().split("\n"):
-        line = line.strip().strip("-").strip("*").strip()
+        # Strip common LLM formatting noise: bullets, bold, numbering
+        line = re.sub(r"^\s*[\-\*\•\d]+[\.\)]*\s*", "", line)
+        line = line.strip().strip("*").strip()
         if ":" in line and line:
             parts = line.split(":", 1)
             label = parts[0].strip().strip("*").strip()
             value = parts[1].strip().strip("*").strip()
-            if label and value:
+            # Skip lines that are source citations like "(Source: Wikipedia)"
+            if label and value and len(label) < 60 and len(value) > 0:
                 metrics.append((label, value))
+
     if not metrics:
         st.markdown(sanitise_for_streamlit(body))
         return
 
+    # Always show exactly 3 cards — pad if LLM returned fewer
     metrics = metrics[:3]
+    while len(metrics) < 3:
+        metrics.append(("Data not available", "N/A"))
+
     cards_html = '<div class="kpi-row">'
     for label, value in metrics:
         safe_value = sanitise_for_streamlit(value)
@@ -1845,15 +1870,12 @@ def render_related_industries(llm, industry: str):
         for col, item in zip(cols, row_items):
             with col:
                 if st.button(f"→ {item}", key=f"related_{item}", use_container_width=True):
-                    # Reset the pipeline, clear related industries cache so the
-                    # new industry gets its own suggestions, then jump straight
-                    # to retrieval — the industry is already validated by the LLM
-                    # that generated this list, so no need to re-validate it.
                     reset_pipeline()
                     st.session_state.industry_input = item
                     st.session_state.validated_industry = item
+                    st.session_state["industry_text_input"] = item
+                    st.session_state["_last_synced_input"] = item
                     st.session_state.current_step = 2
-                    # Clear related industries so new ones are generated for the new industry
                     st.session_state.pop("related_industries", None)
                     st.session_state.pop("related_for", None)
                     st.rerun()
