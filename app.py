@@ -1199,43 +1199,6 @@ def render_step_1(llm, model_name: str = "", api_key: str = ""):
         "terms — for example, *'pharma'*, *'AI'*, or *'renewables'*."
     )
 
-    # When a suggestion or related industry chip is clicked, the industry
-    # name is stored in "pending_industry" and a flag "pending_confirmed"
-    # starts as False. On the next rerun we show a confirmation screen.
-    # When the user clicks "Search", we set the flag to True and rerun,
-    # which triggers the actual pipeline. This two-step pattern avoids
-    # the Streamlit limitation where you cannot update a text_input value
-    # from session state after it has already been rendered.
-    pending = st.session_state.get("pending_industry", None)
-
-    if pending and not st.session_state.get("pending_confirmed", False):
-        # Show confirmation screen
-        st.success(f"Selected: **{pending}**")
-        col1, col2 = st.columns([1, 3])
-        with col1:
-            if st.button("Search this industry →", type="primary"):
-                st.session_state["pending_confirmed"] = True
-                st.rerun()
-        with col2:
-            if st.button("Choose a different industry"):
-                st.session_state.pop("pending_industry", None)
-                st.session_state.pop("pending_confirmed", None)
-                st.rerun()
-        return
-
-    if pending and st.session_state.get("pending_confirmed", False):
-        # Confirmation clicked — run the pipeline for the pending industry
-        chosen = pending
-        st.session_state.pop("pending_industry", None)
-        st.session_state.pop("pending_confirmed", None)
-        reset_pipeline()
-        st.session_state.industry_input = chosen
-        st.session_state.validated_industry = chosen
-        st.session_state.current_step = 2
-        st.session_state.pop("related_industries", None)
-        st.session_state.pop("related_for", None)
-        st.rerun()
-
     industry = st.text_input(
         "Industry name",
         placeholder="e.g. Renewable Energy, Semiconductor Manufacturing, Fintech",
@@ -1282,13 +1245,13 @@ def render_step_1(llm, model_name: str = "", api_key: str = ""):
                 "Company names, product names, and general words are not accepted."
             )
 
-            st.markdown("**Not sure what to enter? Try one of these:**")
-            cols = st.columns(3)
-            for i, suggestion in enumerate(INDUSTRY_SUGGESTIONS):
-                with cols[i % 3]:
-                    if st.button(suggestion, key=f"suggest_{suggestion}", use_container_width=True):
-                        st.session_state["pending_industry"] = suggestion
-                        st.rerun()
+            st.markdown(
+                "**Examples you could try:** "
+                + ", ".join(f"*{s}*" for s in INDUSTRY_SUGGESTIONS)
+            )
+
+            if st.button("← Try again", type="secondary"):
+                st.rerun()
 
     elif not industry:
         st.info("Enter an industry name above to get started.")
@@ -1867,21 +1830,19 @@ def render_related_industries(llm, industry: str):
     st.markdown(
         '<div class="related-section">'
         '<h4>Explore Related Industries</h4>'
-        '<p class="related-subtitle">Click any industry below to generate a new report</p>'
+        '<p class="related-subtitle">Search one of these in the box above to generate a new report</p>'
         '</div>',
         unsafe_allow_html=True,
     )
 
-    # Render chips in rows of 3 using Streamlit columns
-    cols_per_row = 3
-    for i in range(0, len(related), cols_per_row):
-        row_items = related[i:i + cols_per_row]
-        cols = st.columns(len(row_items))
-        for col, item in zip(cols, row_items):
-            with col:
-                if st.button(f"→ {item}", key=f"related_{item}", use_container_width=True):
-                    st.session_state["pending_industry"] = item
-                    st.rerun()
+    # Display related industries as plain styled text chips — no buttons,
+    # which avoids Streamlit rerun conflicts. User reads them and types
+    # their chosen industry into the search box above.
+    chips_html = '<div class="related-grid">'
+    for item in related:
+        chips_html += f'<span class="related-chip">{item}</span>'
+    chips_html += '</div>'
+    st.markdown(chips_html, unsafe_allow_html=True)
 
 
 def render_step_3(llm, model_name: str = ""):
