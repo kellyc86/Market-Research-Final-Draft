@@ -1498,29 +1498,40 @@ def render_kpi_cards(body: str):
     """Render Key Metrics section as large KPI cards in a horizontal row.
 
     Parses 'LABEL: value' lines from the body. Handles bullet points,
-    bold markers, and numbered prefixes that LLMs occasionally add.
+    bold markers, numbered prefixes, and inline source citations that
+    LLMs occasionally add despite prompt instructions.
     Always renders exactly 3 cards -- pads with 'N/A' if fewer than 3
     metrics are found so the layout stays consistent.
     Falls back to plain markdown only if no colon-separated lines exist at all.
     """
+    # Skip instruction-style lines the LLM sometimes echoes back
+    SKIP_PREFIXES = (
+        "extract", "strict format", "correct example", "wrong", "rules",
+        "note", "source", "http", "label:", "value:", "follow this",
+    )
+
     metrics = []
     for line in body.strip().split("\n"):
-        # Strip bullets, bold markers, and number prefixes
-        line = re.sub(r"^\s*[\-\*\-\d]+[\.\)]*\s*", "", line)
-        line = line.strip().strip("*").strip()
-        if ":" not in line or not line:
+        # Strip leading bullets, dashes, asterisks, and numbered prefixes
+        line = re.sub(r"^\s*[-*\d]+[.)]*\s*", "", line)
+        # Strip bold markers, hash markers, and surrounding whitespace
+        line = line.strip().strip("*").strip("#").strip()
+        if not line or ":" not in line:
+            continue
+        # Skip lines that look like prompt instructions echoed back
+        if any(line.lower().startswith(p) for p in SKIP_PREFIXES):
             continue
         parts = line.split(":", 1)
         label = parts[0].strip().strip("*").strip()
         value = parts[1].strip().strip("*").strip()
-        # Label should be short (a metric name, not a sentence)
-        # Value must exist and not be empty
-        # Skip lines where the label looks like a sentence or URL
-        if (label and value
-                and len(label) < 50
-                and len(label.split()) <= 6
-                and not label.startswith("http")
-                and len(value) > 0):
+        # Strip trailing parenthetical source citations e.g. "(Semiconductor industry)"
+        value = re.sub(r"\s*\([^)]{0,80}\)\s*$", "", value).strip()
+        # Label should be short (a metric name, not a sentence or URL)
+        if (label
+                and value
+                and len(label) < 80
+                and len(label.split()) <= 8
+                and not label.lower().startswith("http")):
             metrics.append((label, value))
 
     if not metrics:
