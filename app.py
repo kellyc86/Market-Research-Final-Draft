@@ -190,6 +190,21 @@ def validate_industry(llm, user_input: str) -> dict:
     chain = prompt | llm | StrOutputParser()
     response = chain.invoke({"input": user_input})
 
+    # Normalise the raw response before parsing — LLMs occasionally use
+    # en-dashes, smart quotes, or other Unicode in their output even when
+    # following a strict format. ASCII-safe substitutions prevent crashes
+    # in the startswith() comparisons below.
+    response = (
+        response
+        .replace("\u2013", "-")   # en-dash
+        .replace("\u2014", "-")   # em-dash
+        .replace("\u2018", "'")   # left single quote
+        .replace("\u2019", "'")   # right single quote
+        .replace("\u201c", '"')   # left double quote
+        .replace("\u201d", '"')   # right double quote
+        .replace("\u00a0", " ")   # non-breaking space
+    )
+
     # Parse the structured three-line response.
     # If the LLM deviates from the format, we default to invalid rather
     # than silently accepting input that may have no Wikipedia coverage.
@@ -1162,12 +1177,26 @@ def render_sidebar() -> tuple[str, str]:
     return selected_model, api_key
 
 
+INDUSTRY_SUGGESTIONS = [
+    "Renewable Energy", "Semiconductor Manufacturing", "Pharmaceutical Industry",
+    "Fintech", "Automotive Industry", "Artificial Intelligence Industry",
+    "E-commerce", "Aerospace and Defence", "Telecommunications", "Cybersecurity",
+]
+
+
 def render_step_1(llm, model_name: str = "", api_key: str = ""):
-    """Step 1: Industry input and validation."""
+    """Step 1: Industry input and validation.
+
+    Validation is LLM-powered so it handles informal names and abbreviations
+    gracefully. Invalid inputs show a helpful recovery UI — the reason the
+    LLM rejected the input plus a clickable list of example industries — so
+    the user never hits a dead end.
+    """
     st.header("Step 1: Enter an Industry")
     st.markdown(
-        "Provide the name of an industry or economic sector to research. "
-        "The assistant will validate your input before proceeding."
+        "Enter the name of an industry or economic sector to research. "
+        "The assistant accepts standard names, abbreviations, and informal "
+        "terms — for example, *'pharma'*, *'AI'*, or *'renewables'*."
     )
 
     industry = st.text_input(
@@ -1195,20 +1224,48 @@ def render_step_1(llm, model_name: str = "", api_key: str = ""):
             normalised = result["normalised"] or industry
             st.session_state.validated_industry = normalised
             st.session_state.current_step = 2
-            st.success(
-                f"Recognised industry: **{normalised}**"
-            )
+            st.success(f"Recognised industry: **{normalised}**")
             if result["reason"]:
                 st.caption(result["reason"])
             st.rerun()
         else:
+            # Show a clear rejection message with the LLM's specific reason,
+            # then offer clickable example industries so the user has an
+            # immediate path forward rather than guessing what to type.
             st.warning(
-                "That doesn't appear to be a recognised industry. "
-                "Please try again with a specific industry name "
-                "(e.g. 'Renewable Energy' rather than 'energy')."
+                f"**'{industry}'** wasn't recognised as an industry or economic sector."
             )
-            if result["reason"]:
-                st.caption(result["reason"])
+            reason = result.get("reason", "")
+            if reason:
+                st.caption(f"Reason: {reason}")
+
+            st.markdown(
+                "Please enter a **specific industry name** — for example an "
+                "economic sector, market, or technology vertical. "
+                "Company names, product names, and general words are not accepted."
+            )
+
+            st.markdown("**Not sure what to enter? Try one of these:**")
+            cols = st.columns(3)
+            for i, suggestion in enumerate(INDUSTRY_SUGGESTIONS):
+                with cols[i % 3]:
+                    if st.button(suggestion, key=f"suggest_{suggestion}", use_container_width=True):
+                        reset_pipeline()
+                        st.session_state.industry_input = suggestion
+                        with st.spinner(f"Validating '{suggestion}'..."):
+                            try:
+                                if model_name and api_key:
+                                    res2 = _cached_validate_industry(model_name, api_key, suggestion)
+                                else:
+                                    res2 = validate_industry(llm, suggestion)
+                            except Exception as e:
+                                handle_api_error(e, "Validation")
+                                return
+                        if res2["is_valid"]:
+                            normalised2 = res2["normalised"] or suggestion
+                            st.session_state.validated_industry = normalised2
+                            st.session_state.current_step = 2
+                            st.rerun()
 
     elif not industry:
         st.info("Enter an industry name above to get started.")
