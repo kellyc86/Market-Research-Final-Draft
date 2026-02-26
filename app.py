@@ -25,6 +25,7 @@ unreliable at self-counting tokens.
 import io
 import re
 import streamlit as st
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_community.retrievers import WikipediaRetriever
@@ -105,6 +106,42 @@ def initialise_llm(model_name: str, api_key: str) -> ChatGoogleGenerativeAI:
         google_api_key=api_key,
         temperature=DEFAULT_TEMPERATURE,
     )
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def _cached_validate_industry(model_name: str, api_key: str, user_input: str) -> dict:
+    """Cached wrapper around industry validation.
+
+    Validation makes an LLM call for every submission, even if the user
+    types the same industry twice in a session. Caching by (model, key, input)
+    means repeat submissions — common when users tweak capitalisation or
+    re-run — hit the cache instantly instead of spending 1-2 seconds on
+    an API round-trip. TTL of one hour prevents stale results across
+    very long sessions.
+    """
+    llm = ChatGoogleGenerativeAI(
+        model=LLM_MODEL_MAP[model_name],
+        google_api_key=api_key,
+        temperature=DEFAULT_TEMPERATURE,
+    )
+    return validate_industry(llm, user_input)
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def _cached_generate_search_queries(model_name: str, api_key: str, industry: str) -> list[str]:
+    """Cached wrapper around query generation.
+
+    The same industry name always produces the same set of five queries —
+    the output is deterministic at temperature 0.2. Caching this call
+    saves another 1-2 seconds on re-runs and on the common case where
+    the user goes back and re-generates after reading the sources.
+    """
+    llm = ChatGoogleGenerativeAI(
+        model=LLM_MODEL_MAP[model_name],
+        google_api_key=api_key,
+        temperature=DEFAULT_TEMPERATURE,
+    )
+    return generate_search_queries(llm, industry)
 
 
 def validate_industry(llm, user_input: str) -> dict:
@@ -220,45 +257,58 @@ def generate_search_queries(llm, industry: str) -> list[str]:
     return queries[:NUM_SEARCH_QUERIES + 1]
 
 
-def retrieve_wikipedia_pages(industry: str, queries: list[str]) -> list[dict]:
-    """Retrieve Wikipedia pages across all generated queries, deduplicated by title.
+def _fetch_single_query(query: str) -> list[dict]:
+    """Fetch Wikipedia pages for a single query. Runs inside a thread.
 
-    Running the retriever independently for each query means the same page
-    can appear in multiple result sets. Deduplication by title ensures each
-    unique page is only passed forward once, keeping the candidate pool
-    clean before the LLM ranking step. Failed queries are silently skipped
-    so a single bad query string does not abort the entire retrieval.
+    Isolated into its own function so ThreadPoolExecutor can call it
+    independently per query. Returns an empty list on any failure so
+    a single bad query does not interrupt the other concurrent fetches.
     """
     retriever = WikipediaRetriever(
         top_k_results=MAX_WIKI_RESULTS,
         doc_content_chars_max=WIKI_CONTENT_CHARS,
     )
+    try:
+        docs = retriever.invoke(query)
+    except Exception:
+        return []
 
+    results = []
+    for doc in docs:
+        title = doc.metadata.get("title", "Unknown")
+        source = doc.metadata.get("source", "") or (
+            "https://en.wikipedia.org/wiki/" + title.replace(" ", "_")
+        )
+        results.append({
+            "title": title,
+            "url": source,
+            "content": doc.page_content,
+        })
+    return results
+
+
+def retrieve_wikipedia_pages(industry: str, queries: list[str]) -> list[dict]:
+    """Retrieve Wikipedia pages for all queries in parallel, deduplicated by title.
+
+    Sequential retrieval (one query at a time) is the main bottleneck in the
+    pipeline — each Wikipedia API call takes 1-3 seconds and they have no
+    dependency on each other. Running them concurrently with a thread pool
+    cuts retrieval time by roughly 4-5x for five queries, since the wall-clock
+    time is determined by the slowest single request rather than the sum of all.
+
+    Threads are used rather than async because WikipediaRetriever is a
+    synchronous blocking call and does not expose an async interface.
+    """
     pages = []
     seen_titles = set()
 
-    for query in queries:
-        try:
-            docs = retriever.invoke(query)
-        except Exception:
-            continue
-
-        for doc in docs:
-            title = doc.metadata.get("title", "Unknown")
-            if title in seen_titles:
-                continue
-            seen_titles.add(title)
-            source = doc.metadata.get("source", "")
-            if not source:
-                source = (
-                    "https://en.wikipedia.org/wiki/"
-                    + title.replace(" ", "_")
-                )
-            pages.append({
-                "title": title,
-                "url": source,
-                "content": doc.page_content,
-            })
+    with ThreadPoolExecutor(max_workers=len(queries)) as executor:
+        futures = {executor.submit(_fetch_single_query, q): q for q in queries}
+        for future in as_completed(futures):
+            for page in future.result():
+                if page["title"] not in seen_titles:
+                    seen_titles.add(page["title"])
+                    pages.append(page)
 
     return pages
 
@@ -342,6 +392,40 @@ def select_top_pages(
     return selected[:FINAL_SOURCE_COUNT]
 
 
+def filter_low_quality_pages(pages: list[dict]) -> list[dict]:
+    """Remove Wikipedia stub pages and disambiguation pages before LLM ranking.
+
+    Two failure modes degrade report quality without this filter:
+    1. Stub pages — Wikipedia articles under ~300 words that contain
+       almost no substantive content. Passing these to the LLM ranker
+       wastes ranking capacity on pages that would be useless as sources.
+    2. Disambiguation pages — pages that only list alternative meanings
+       of a term. These contain no industry content at all and are
+       identifiable by the presence of 'may refer to' in the opening text.
+
+    The minimum length threshold (1500 characters) is deliberately
+    conservative. A page this short is almost certainly a stub or a
+    very narrow sub-article that adds little to a broad industry report.
+    Raising the threshold would risk discarding legitimately concise but
+    useful overview articles.
+    """
+    MIN_CONTENT_LENGTH = 1500
+    filtered = []
+    for page in pages:
+        content = page["content"]
+        # Reject disambiguation pages
+        if "may refer to" in content[:300].lower():
+            continue
+        # Reject stubs — too short to contain useful market data
+        if len(content) < MIN_CONTENT_LENGTH:
+            continue
+        filtered.append(page)
+
+    # If filtering removes everything, fall back to the full list
+    # to avoid returning zero candidates to the ranking step
+    return filtered if filtered else pages
+
+
 def check_source_diversity(pages: list[dict]) -> dict:
     """Measure content overlap between retrieved pages using Jaccard similarity.
 
@@ -388,6 +472,35 @@ def check_source_diversity(pages: list[dict]) -> dict:
             ),
         }
     return {"is_diverse": True, "avg_overlap": avg_overlap, "warning": ""}
+
+
+def generate_related_industries(llm, industry: str) -> list[str]:
+    """Generate a list of related industries for deeper research suggestions.
+
+    A good analyst does not stop at a single industry in isolation — adjacent
+    sectors often explain demand dynamics, supply chain dependencies, or
+    competitive threats that shape the focal industry. For example, researching
+    Electric Vehicles naturally connects to Battery Manufacturing, Semiconductor
+    Industry, and Renewable Energy. Surfacing these connections helps the user
+    build a more complete picture with follow-on searches.
+    """
+    prompt = ChatPromptTemplate.from_messages([
+        ("system",
+         "You are a market research analyst. Given an industry, return exactly "
+         "6 related or adjacent industries that a researcher would benefit from "
+         "exploring next for deeper context.\n\n"
+         "Focus on industries that are:\n"
+         "- Upstream suppliers or downstream customers\n"
+         "- Competitive substitutes or adjacent markets\n"
+         "- Sectors that heavily influence or are influenced by this one\n\n"
+         "Respond with ONLY the 6 industry names, one per line. "
+         "Use standard industry names (2-5 words). No numbering, no explanation."),
+        ("human", "Industry: {industry}"),
+    ])
+    chain = prompt | llm | StrOutputParser()
+    response = chain.invoke({"industry": industry})
+    industries = [r.strip() for r in response.strip().split("\n") if r.strip()]
+    return industries[:6]
 
 
 def enforce_word_limit(text: str, limit: int = HARD_WORD_LIMIT) -> str:
@@ -924,6 +1037,67 @@ def inject_custom_css():
     .sources-footer a {
         color: #0085CA;
     }
+
+    /* ── Related Industries ── */
+    .related-section {
+        margin-top: 2rem;
+        padding-top: 1.5rem;
+        border-top: 2px solid #E8ECF0;
+    }
+    .related-section h4 {
+        font-family: 'Playfair Display', 'Georgia', serif;
+        color: #003A70;
+        font-size: 18px;
+        font-weight: 700;
+        margin-bottom: 0.3rem;
+    }
+    .related-section .related-subtitle {
+        color: #888;
+        font-size: 13px;
+        margin-bottom: 1rem;
+    }
+    .related-grid {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.6rem;
+        margin-top: 0.5rem;
+    }
+    .related-chip {
+        background: #F0F6FC;
+        border: 1.5px solid #003A70;
+        color: #003A70;
+        border-radius: 20px;
+        padding: 0.4rem 1rem;
+        font-size: 13px;
+        font-weight: 500;
+        cursor: pointer;
+        transition: all 0.15s ease;
+        white-space: nowrap;
+    }
+    .related-chip:hover {
+        background: #003A70;
+        color: #FFFFFF;
+    }
+
+    /* ── Upgraded Typography ── */
+    @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700&family=DM+Sans:wght@400;500;600&display=swap');
+
+    .report-header h2 {
+        font-family: 'Playfair Display', 'Georgia', serif !important;
+        letter-spacing: -0.01em;
+    }
+    .report-section h3,
+    .insight-callout h3,
+    .takeaway-box h3 {
+        font-family: 'Playfair Display', 'Georgia', serif !important;
+    }
+    .report-section,
+    .insight-callout p,
+    .takeaway-box p,
+    .kpi-card,
+    .source-card {
+        font-family: 'DM Sans', 'Inter', 'Helvetica Neue', Arial, sans-serif !important;
+    }
     </style>
     """, unsafe_allow_html=True)
 
@@ -987,7 +1161,7 @@ def render_sidebar() -> tuple[str, str]:
     return selected_model, api_key
 
 
-def render_step_1(llm):
+def render_step_1(llm, model_name: str = "", api_key: str = ""):
     """Step 1: Industry input and validation."""
     st.header("Step 1: Enter an Industry")
     st.markdown(
@@ -995,7 +1169,6 @@ def render_step_1(llm):
         "The assistant will validate your input before proceeding."
     )
 
-    # Text input
     industry = st.text_input(
         "Industry name",
         placeholder="e.g. Renewable Energy, Semiconductor Manufacturing, Fintech",
@@ -1008,7 +1181,11 @@ def render_step_1(llm):
 
         with st.spinner("Validating your input..."):
             try:
-                result = validate_industry(llm, industry)
+                # Use cached validation when model name and key are available
+                if model_name and api_key:
+                    result = _cached_validate_industry(model_name, api_key, industry)
+                else:
+                    result = validate_industry(llm, industry)
             except Exception as e:
                 handle_api_error(e, "Validation")
                 return
@@ -1036,7 +1213,7 @@ def render_step_1(llm):
         st.info("Enter an industry name above to get started.")
 
 
-def render_step_2(llm):
+def render_step_2(llm, model_name: str = "", api_key: str = ""):
     """Step 2: Retrieve and display 5 most relevant Wikipedia sources."""
     industry = st.session_state.validated_industry
 
@@ -1045,8 +1222,11 @@ def render_step_2(llm):
     if not st.session_state.wiki_pages:
         with st.spinner("Generating search queries and retrieving sources..."):
             try:
-                # Generate diverse queries, then retrieve and deduplicate
-                queries = generate_search_queries(llm, industry)
+                # Use cached query generation when possible, then retrieve in parallel
+                if model_name and api_key:
+                    queries = _cached_generate_search_queries(model_name, api_key, industry)
+                else:
+                    queries = generate_search_queries(llm, industry)
                 st.session_state.search_queries = queries
 
                 raw_pages = retrieve_wikipedia_pages(industry, queries)
@@ -1058,6 +1238,9 @@ def render_step_2(llm):
                     )
                     return
 
+                # Remove stubs and disambiguation pages before ranking
+                raw_pages = filter_low_quality_pages(raw_pages)
+
                 if len(raw_pages) < FINAL_SOURCE_COUNT:
                     st.info(
                         f"Found {len(raw_pages)} relevant page(s) "
@@ -1065,7 +1248,7 @@ def render_step_2(llm):
                         f"The report may be less comprehensive."
                     )
 
-                # LLM reranking: filter the candidate pool to the best five
+                # LLM reranking: filter the quality-checked pool to the best five
                 top_pages = select_top_pages(llm, industry, raw_pages)
                 st.session_state.wiki_pages = top_pages
 
@@ -1558,6 +1741,55 @@ def generate_pdf(industry: str, report: str, pages: list[dict]) -> bytes:
     return bytes(pdf_bytes)
 
 
+def render_related_industries(llm, industry: str):
+    """Render a row of clickable chip buttons for related industries.
+
+    Placing related industries at the end of the report encourages the user
+    to explore adjacent sectors rather than stopping at a single data point.
+    Each chip is a Streamlit button — clicking it pre-fills the industry
+    input and resets the pipeline, turning the suggestion into a one-click
+    follow-on search. Related industries are generated once and stored in
+    session state so re-renders do not trigger additional LLM calls.
+    """
+    if "related_industries" not in st.session_state or \
+       st.session_state.get("related_for") != industry:
+        with st.spinner("Finding related industries..."):
+            try:
+                related = generate_related_industries(llm, industry)
+                st.session_state.related_industries = related
+                st.session_state.related_for = industry
+            except Exception:
+                st.session_state.related_industries = []
+                st.session_state.related_for = industry
+
+    related = st.session_state.get("related_industries", [])
+    if not related:
+        return
+
+    st.markdown(
+        '<div class="related-section">'
+        '<h4>Explore Related Industries</h4>'
+        '<p class="related-subtitle">Click any industry below to generate a new report</p>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+    # Render chips in rows of 3 using Streamlit columns
+    cols_per_row = 3
+    for i in range(0, len(related), cols_per_row):
+        row_items = related[i:i + cols_per_row]
+        cols = st.columns(len(row_items))
+        for col, item in zip(cols, row_items):
+            with col:
+                if st.button(f"→ {item}", key=f"related_{item}", use_container_width=True):
+                    # Reset the pipeline and pre-load the selected industry
+                    reset_pipeline()
+                    st.session_state.industry_input = item
+                    st.session_state.validated_industry = item
+                    st.session_state.current_step = 2
+                    st.rerun()
+
+
 def render_step_3(llm, model_name: str = ""):
     """Step 3: Generate the industry report and render it section by section.
 
@@ -1632,6 +1864,8 @@ def render_step_3(llm, model_name: str = ""):
     )
     st.markdown(sources_html, unsafe_allow_html=True)
 
+    render_related_industries(llm, industry)
+
     st.divider()
     col1, col2 = st.columns(2)
     with col1:
@@ -1699,10 +1933,10 @@ def main():
     # Steps remain visible once reached so the user can review earlier stages
     step = st.session_state.current_step
 
-    render_step_1(llm)
+    render_step_1(llm, model_name=selected_model, api_key=api_key)
     if step >= 2:
         st.divider()
-        render_step_2(llm)
+        render_step_2(llm, model_name=selected_model, api_key=api_key)
     if step >= 3:
         st.divider()
         render_step_3(llm, selected_model)
